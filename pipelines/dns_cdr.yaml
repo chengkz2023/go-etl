@@ -1,0 +1,32 @@
+# DNS话单管道
+name: dns_cdr
+watch_dir: /data/probe/dns
+file_pattern: "*.csv"
+delimiter: "|"
+has_header_meta: true          # 首行为设备公共信息
+field_names:
+  - timestamp
+  - src_ip
+  - dst_ip
+  - domain
+  - dns_type
+  - response_code
+transformers:
+  - type: ip_matcher
+    fields:
+      - src_ip
+      - dst_ip
+    label_fields:
+      - src_geo
+      - dst_geo
+  - type: dict_mapper
+    field: dns_type
+    dict:
+      "1": "A"
+      "28": "AAAA"
+      "5": "CNAME"
+      "2": "NS"
+      "15": "MX"
+clickhouse_table: raw.dns_log
+workers: 4
+batch_size: 5000

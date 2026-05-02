@@ -1,0 +1,17 @@
+# Claude Code
+.claude/
+
+# data
+data/
+*.db
+
+# binaries
+go-etl
+cmd/etl/etl
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

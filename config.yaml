@@ -1,0 +1,34 @@
+# go-etl 主配置文件
+# 全局设置 + 管道目录引用
+
+clickhouse:
+  hosts:
+    - "127.0.0.1:9000"
+  database: cdr
+  username: default
+  password: ""
+  max_open_conns: 10
+  max_idle_conns: 5
+  debug: false
+  batch_size: 10000
+  flush_interval: 5s
+
+# IP地址库
+ip_db:
+  type: csv
+  path: ./data/ipdb.csv
+  columns:
+    - country
+    - province
+    - city
+    - isp
+  reload_interval: 3600s
+
+# 管道配置目录（每个话单类型一个文件）
+pipeline_dir: pipelines
+
+# 少量简单管道也可以直接写在这里
+# pipelines:
+#   - name: simple_debug
+#     watch_dir: /tmp/test
+#     ...

@@ -1,0 +1,31 @@
+# HTTP话单管道（分隔符为 |++|）
+name: http_cdr
+watch_dir: /data/probe/http
+file_pattern: "*.log"
+delimiter: "|++|"
+has_header_meta: false
+field_names:
+  - timestamp
+  - client_ip
+  - server_ip
+  - method
+  - url
+  - status_code
+  - bytes_sent
+transformers:
+  - type: ip_matcher
+    fields:
+      - client_ip
+      - server_ip
+    label_fields:
+      - client_geo
+      - server_geo
+  - type: dict_mapper
+    field: method
+    dict:
+      "1": "GET"
+      "2": "POST"
+      "3": "HEAD"
+clickhouse_table: raw.http_log
+workers: 4
+batch_size: 5000
