@@ -18,8 +18,8 @@ var (
 
 // FileStore persists file processing status using bolt.
 type FileStore struct {
-	db       *bolt.DB
-	dbPath   string
+	db     *bolt.DB
+	dbPath string
 }
 
 // NewFileStore opens or creates a bolt database for file status tracking.
@@ -108,6 +108,112 @@ func (s *FileStore) SetProcessing(pipelineName, filePath string) error {
 	return s.updateStatus(pipelineName, filePath, model.StatusProcessing)
 }
 
+// EnqueueReadyFile records a ready file as pending if it can be processed.
+// It returns false when the file is already processing, done, or failed.
+func (s *FileStore) EnqueueReadyFile(pipelineName, filePath string, size int64, modTime time.Time) (bool, error) {
+	enqueued := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFileStatus)
+		k := key(pipelineName, filePath)
+		data := b.Get(k)
+		if data != nil {
+			var rec model.FileRecord
+			if err := json.Unmarshal(data, &rec); err != nil {
+				return err
+			}
+			if rec.Status != model.StatusUnknown && rec.Status != model.StatusPending {
+				return nil
+			}
+		}
+
+		rec := &model.FileRecord{
+			PipelineName: pipelineName,
+			FilePath:     filePath,
+			FileSize:     size,
+			FileModTime:  modTime,
+			Status:       model.StatusPending,
+			ProcessedAt:  time.Now(),
+		}
+		newData, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		if err := b.Put(k, newData); err != nil {
+			return err
+		}
+		enqueued = true
+		return nil
+	})
+	return enqueued, err
+}
+
+// ClaimPending atomically moves a pending file to processing.
+func (s *FileStore) ClaimPending(pipelineName, filePath string) (bool, error) {
+	claimed := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFileStatus)
+		k := key(pipelineName, filePath)
+		data := b.Get(k)
+		if data == nil {
+			return nil
+		}
+
+		var rec model.FileRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		if rec.Status != model.StatusPending {
+			return nil
+		}
+
+		rec.Status = model.StatusProcessing
+		rec.ProcessedAt = time.Now()
+
+		newData, err := json.Marshal(&rec)
+		if err != nil {
+			return err
+		}
+		if err := b.Put(k, newData); err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	return claimed, err
+}
+
+// ResetProcessingToPending makes interrupted files eligible for processing again.
+func (s *FileStore) ResetProcessingToPending(pipelineName string) (int, error) {
+	count := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFileStatus)
+		c := b.Cursor()
+		prefix := []byte(pipelineName + ":")
+		for k, v := c.Seek(prefix); k != nil && len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
+			var rec model.FileRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.Status != model.StatusProcessing {
+				continue
+			}
+			rec.Status = model.StatusPending
+			rec.ProcessedAt = time.Now()
+
+			newData, err := json.Marshal(&rec)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, newData); err != nil {
+				return err
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 // SetDone marks a file as successfully processed.
 func (s *FileStore) SetDone(pipelineName, filePath string, rowCount int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -136,6 +242,11 @@ func (s *FileStore) SetDone(pipelineName, filePath string, rowCount int64) error
 
 // SetFailed marks a file as failed with an error message.
 func (s *FileStore) SetFailed(pipelineName, filePath string, errMsg string) error {
+	return s.SetFailedForRetry(pipelineName, filePath, errMsg, 0)
+}
+
+// SetFailedForRetry marks a file as failed and records its next retry time.
+func (s *FileStore) SetFailedForRetry(pipelineName, filePath string, errMsg string, retryInterval time.Duration) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketFileStatus)
 		k := key(pipelineName, filePath)
@@ -148,8 +259,80 @@ func (s *FileStore) SetFailed(pipelineName, filePath string, errMsg string) erro
 			return err
 		}
 		rec.Status = model.StatusFailed
+		rec.Attempts++
 		rec.ProcessedAt = time.Now()
+		if retryInterval > 0 {
+			rec.NextRetryAt = rec.ProcessedAt.Add(retryInterval)
+		} else {
+			rec.NextRetryAt = time.Time{}
+		}
 		rec.Error = errMsg
+
+		newData, err := json.Marshal(&rec)
+		if err != nil {
+			return err
+		}
+		return b.Put(k, newData)
+	})
+}
+
+// ResetRetryableFailedToPending makes failed files eligible for retry.
+func (s *FileStore) ResetRetryableFailedToPending(pipelineName string, maxRetries int, now time.Time) (int, error) {
+	count := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFileStatus)
+		c := b.Cursor()
+		prefix := []byte(pipelineName + ":")
+		for k, v := c.Seek(prefix); k != nil && len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
+			var rec model.FileRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.Status != model.StatusFailed {
+				continue
+			}
+			if maxRetries >= 0 && rec.Attempts >= maxRetries {
+				continue
+			}
+			if !rec.NextRetryAt.IsZero() && now.Before(rec.NextRetryAt) {
+				continue
+			}
+			rec.Status = model.StatusPending
+			rec.ProcessedAt = now
+			rec.NextRetryAt = time.Time{}
+
+			newData, err := json.Marshal(&rec)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, newData); err != nil {
+				return err
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
+// MarkDead marks a failed file as dead-lettered.
+func (s *FileStore) MarkDead(pipelineName, filePath, targetPath string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFileStatus)
+		k := key(pipelineName, filePath)
+		data := b.Get(k)
+		if data == nil {
+			return nil
+		}
+		var rec model.FileRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		rec.Status = model.StatusDead
+		rec.ProcessedAt = time.Now()
+		rec.DeadLetterAt = rec.ProcessedAt
+		rec.DeadLetterTo = targetPath
+		rec.NextRetryAt = time.Time{}
 
 		newData, err := json.Marshal(&rec)
 		if err != nil {

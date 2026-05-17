@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"go-etl/config"
+	"go-etl/metrics"
 	"go-etl/model"
 	"go-etl/reader"
 	"go-etl/store"
@@ -22,9 +24,9 @@ import (
 
 // Pipeline orchestrates the full ETL flow for one directory/table pair.
 type Pipeline struct {
-	cfg     config.PipelineConfig
-	store   *store.FileStore
-	logger  *zap.Logger
+	cfg    config.PipelineConfig
+	store  *store.FileStore
+	logger *zap.Logger
 
 	chain       transform.Chain
 	clickWriter *writer.ClickHouseWriter
@@ -38,7 +40,9 @@ type Pipeline struct {
 func New(
 	cfg config.PipelineConfig,
 	chCfg config.ClickHouseConfig,
-	ipdb interface{ Lookup(ipStr string) map[string]string },
+	ipdb interface {
+		Lookup(ipStr string) map[string]string
+	},
 	fileStore *store.FileStore,
 	logger *zap.Logger,
 ) (*Pipeline, error) {
@@ -64,6 +68,7 @@ func New(
 		},
 		cfg.ClickHouseTable,
 		cfg.FieldNames,
+		cfg.Fields,
 		cfg.BatchSize,
 		chCfg.FlushInterval,
 	)
@@ -90,7 +95,37 @@ func (p *Pipeline) Run() error {
 		zap.String("table", p.cfg.ClickHouseTable),
 	)
 
-	w, err := watcher.New(p.cfg.Name, p.cfg.WatchDir, p.cfg.FilePattern, p.store, 30*time.Second, p.logger)
+	recovered, err := p.store.ResetProcessingToPending(p.cfg.Name)
+	if err != nil {
+		return fmt.Errorf("recover processing files: %w", err)
+	}
+	if recovered > 0 {
+		p.logger.Info("recovered interrupted files", zap.Int("files", recovered))
+	}
+	if p.cfg.RetryFailed {
+		retryable, err := p.store.ResetRetryableFailedToPending(p.cfg.Name, p.cfg.MaxRetries, time.Now())
+		if err != nil {
+			return fmt.Errorf("recover failed files for retry: %w", err)
+		}
+		if retryable > 0 {
+			p.logger.Info("recovered failed files for retry", zap.Int("files", retryable))
+		}
+	}
+
+	w, err := watcher.New(
+		p.cfg.Name,
+		p.cfg.WatchDir,
+		watcher.ReadyConfig{
+			Strategy:     p.cfg.ReadyStrategy,
+			FilePattern:  p.cfg.FilePattern,
+			TempSuffixes: p.cfg.TempSuffixes,
+			MarkerSuffix: p.cfg.MarkerSuffix,
+			StableDelay:  p.cfg.StableDelay,
+		},
+		p.store,
+		30*time.Second,
+		p.logger,
+	)
 	if err != nil {
 		return fmt.Errorf("create watcher: %w", err)
 	}
@@ -146,16 +181,28 @@ func (p *Pipeline) worker(workCh <-chan string) {
 }
 
 func (p *Pipeline) processFile(filePath string) {
+	start := time.Now()
 	logger := p.logger.With(zap.String("file", filePath))
+	metrics.Inc(p.cfg.Name, "files_seen_total", 1)
 
-	if err := p.store.SetProcessing(p.cfg.Name, filePath); err != nil {
-		logger.Error("mark processing failed", zap.Error(err))
+	claimed, err := p.store.ClaimPending(p.cfg.Name, filePath)
+	if err != nil {
+		logger.Error("claim file failed", zap.Error(err))
+		metrics.Inc(p.cfg.Name, "claim_errors_total", 1)
+		return
 	}
+	if !claimed {
+		logger.Debug("file was already claimed or completed")
+		metrics.Inc(p.cfg.Name, "files_skipped_total", 1)
+		return
+	}
+	metrics.Inc(p.cfg.Name, "files_processing_total", 1)
 
 	f, err := os.Open(filePath)
 	if err != nil {
 		logger.Error("open file failed", zap.Error(err))
-		p.store.SetFailed(p.cfg.Name, filePath, err.Error())
+		p.failFile(filePath, err, logger)
+		metrics.Inc(p.cfg.Name, "files_failed_total", 1)
 		return
 	}
 	defer f.Close()
@@ -170,61 +217,161 @@ func (p *Pipeline) processFile(filePath string) {
 		f.Seek(0, 0)
 	}
 
-	// Build reader for this file
 	rdr := reader.NewReader(p.cfg.Delimiter, p.cfg.FieldNames, false, headerMeta)
-	// We handle skip ourselves since we already advanced
-	// Actually, pass skipLines through the reader's internal counter
-	// Since the reader doesn't expose skipLines after construction, we read manually:
+	rdr.SetSkipLines(skipLines)
 
-	rows, err := p.readRowsWithSkip(f, rdr, skipLines)
-	if err != nil {
-		logger.Error("read file failed", zap.Error(err))
-		p.store.SetFailed(p.cfg.Name, filePath, err.Error())
-		return
-	}
-
-	if len(rows) == 0 {
-		logger.Info("file has no data rows, skipping")
-		p.store.SetDone(p.cfg.Name, filePath, 0)
-		return
-	}
-
-	// Transform and write
 	batchSize := p.cfg.BatchSize
+	readRows := 0
 	processed := 0
-
-	for i := 0; i < len(rows); i += batchSize {
-		end := i + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-		batch := rows[i:end]
-
+	transformErrors := 0
+	err = rdr.ReadBatches(f, batchSize, func(batch []model.Row) error {
+		readRows += len(batch)
 		transformed := p.chain.BatchTransform(batch, func(row model.Row, err error) {
+			transformErrors++
 			logger.Warn("transform row failed", zap.Error(err))
 		})
 
 		if len(transformed) > 0 {
 			if err := p.clickWriter.WriteBatch(transformed); err != nil {
-				logger.Error("write batch failed", zap.Error(err))
-				p.store.SetFailed(p.cfg.Name, filePath, err.Error())
-				return
+				return err
 			}
 		}
 		processed += len(transformed)
+		return nil
+	})
+	if err != nil {
+		logger.Error("process file failed", zap.Error(err))
+		p.failFile(filePath, err, logger)
+		metrics.Inc(p.cfg.Name, "files_failed_total", 1)
+		return
 	}
 
 	if err := p.clickWriter.Flush(); err != nil {
 		logger.Error("flush failed", zap.Error(err))
-		p.store.SetFailed(p.cfg.Name, filePath, err.Error())
+		p.failFile(filePath, err, logger)
+		metrics.Inc(p.cfg.Name, "files_failed_total", 1)
 		return
+	}
+
+	if processed == 0 {
+		logger.Info("file has no data rows, skipping")
 	}
 
 	if err := p.store.SetDone(p.cfg.Name, filePath, int64(processed)); err != nil {
 		logger.Error("mark done failed", zap.Error(err))
 	}
+	p.afterSuccess(filePath, logger)
 
-	logger.Info("file processed", zap.Int("rows", processed))
+	duration := time.Since(start)
+	metrics.Inc(p.cfg.Name, "files_done_total", 1)
+	metrics.Inc(p.cfg.Name, "rows_read_total", int64(readRows))
+	metrics.Inc(p.cfg.Name, "rows_written_total", int64(processed))
+	metrics.Inc(p.cfg.Name, "transform_errors_total", int64(transformErrors))
+	metrics.ObserveDuration(p.cfg.Name, "file_process", duration)
+	logger.Info("file processed",
+		zap.Int("rows_read", readRows),
+		zap.Int("rows_written", processed),
+		zap.Int("transform_errors", transformErrors),
+		zap.Duration("duration", duration),
+	)
+}
+
+func (p *Pipeline) afterSuccess(filePath string, logger *zap.Logger) {
+	if p.cfg.CleanupMarker {
+		if err := p.cleanupMarker(filePath); err != nil {
+			logger.Warn("cleanup marker failed", zap.Error(err))
+			metrics.Inc(p.cfg.Name, "marker_cleanup_errors_total", 1)
+		} else {
+			metrics.Inc(p.cfg.Name, "markers_cleaned_total", 1)
+		}
+	}
+	if p.cfg.ArchiveDir == "" {
+		return
+	}
+	targetPath, err := moveFileToDir(filePath, p.cfg.ArchiveDir)
+	if err != nil {
+		logger.Warn("archive file failed", zap.Error(err))
+		metrics.Inc(p.cfg.Name, "archive_errors_total", 1)
+		return
+	}
+	metrics.Inc(p.cfg.Name, "files_archived_total", 1)
+	logger.Info("file archived", zap.String("target", targetPath))
+}
+
+func (p *Pipeline) cleanupMarker(filePath string) error {
+	if p.cfg.ReadyStrategy != watcher.ReadyMarker {
+		return nil
+	}
+	markerPath := filePath + p.cfg.MarkerSuffix
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (p *Pipeline) failFile(filePath string, cause error, logger *zap.Logger) {
+	if !p.cfg.RetryFailed {
+		if err := p.store.SetFailed(p.cfg.Name, filePath, cause.Error()); err != nil {
+			logger.Error("mark failed failed", zap.Error(err))
+		}
+		metrics.Inc(p.cfg.Name, "files_failed_no_retry_total", 1)
+		return
+	}
+
+	if err := p.store.SetFailedForRetry(p.cfg.Name, filePath, cause.Error(), p.cfg.RetryInterval); err != nil {
+		logger.Error("mark failed for retry failed", zap.Error(err))
+		metrics.Inc(p.cfg.Name, "retry_mark_errors_total", 1)
+		return
+	}
+	metrics.Inc(p.cfg.Name, "files_scheduled_retry_total", 1)
+
+	rec, err := p.store.GetRecord(p.cfg.Name, filePath)
+	if err != nil {
+		logger.Error("load failed record failed", zap.Error(err))
+		return
+	}
+	if rec == nil || rec.Attempts < p.cfg.MaxRetries {
+		return
+	}
+
+	targetPath, moveErr := p.moveToDeadLetter(filePath)
+	if moveErr != nil {
+		logger.Error("move dead-letter file failed", zap.Error(moveErr))
+		return
+	}
+	if err := p.store.MarkDead(p.cfg.Name, filePath, targetPath); err != nil {
+		logger.Error("mark dead-letter failed", zap.Error(err))
+		return
+	}
+	metrics.Inc(p.cfg.Name, "files_dead_total", 1)
+	logger.Error("file moved to dead-letter", zap.String("target", targetPath), zap.Int("attempts", rec.Attempts))
+}
+
+func (p *Pipeline) moveToDeadLetter(filePath string) (string, error) {
+	if p.cfg.DeadLetterDir == "" {
+		return "", nil
+	}
+	return moveFileToDir(filePath, p.cfg.DeadLetterDir)
+}
+
+func moveFileToDir(filePath, targetDir string) (string, error) {
+	if targetDir == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+
+	targetPath := filepath.Join(targetDir, filepath.Base(filePath))
+	if _, err := os.Stat(targetPath); err == nil {
+		ext := filepath.Ext(targetPath)
+		base := strings.TrimSuffix(filepath.Base(targetPath), ext)
+		targetPath = filepath.Join(targetDir, fmt.Sprintf("%s.%d%s", base, time.Now().UnixNano(), ext))
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	return targetPath, os.Rename(filePath, targetPath)
 }
 
 // readHeaderMeta reads the first non-empty line and parses it as header meta.
@@ -240,36 +387,6 @@ func (p *Pipeline) readHeaderMeta(f *os.File) model.Row {
 	return model.Row{}
 }
 
-// readRowsWithSkip reads all data rows, skipping the first skipLines non-empty lines.
-func (p *Pipeline) readRowsWithSkip(f *os.File, rdr *reader.Reader, skipLines int) ([]model.Row, error) {
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 16*1024*1024)
-
-	var allLines []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		allLines = append(allLines, line)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	// Skip header lines
-	start := skipLines
-	if start > len(allLines) {
-		return nil, nil
-	}
-	if start < 0 {
-		start = 0
-	}
-
-	dataLines := strings.Join(allLines[start:], "\n")
-	return rdr.ReadAll(strings.NewReader(dataLines))
-}
-
 // Shutdown gracefully stops the pipeline.
 func (p *Pipeline) Shutdown() {
 	p.cancel()
@@ -277,7 +394,9 @@ func (p *Pipeline) Shutdown() {
 }
 
 // buildTransformChain creates a transform.Chain from config.
-func buildTransformChain(tConfigs []config.TransformerConfig, ipdb interface{ Lookup(ipStr string) map[string]string }) (transform.Chain, error) {
+func buildTransformChain(tConfigs []config.TransformerConfig, ipdb interface {
+	Lookup(ipStr string) map[string]string
+}) (transform.Chain, error) {
 	var chain transform.Chain
 	for _, tc := range tConfigs {
 		switch tc.Type {
@@ -317,7 +436,9 @@ func buildTransformChain(tConfigs []config.TransformerConfig, ipdb interface{ Lo
 
 // ipMatcherAdapter wraps IP lookup as a Transformer.
 type ipMatcherAdapter struct {
-	db          interface{ Lookup(ipStr string) map[string]string }
+	db interface {
+		Lookup(ipStr string) map[string]string
+	}
 	fields      []string
 	labelFields []string
 }

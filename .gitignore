@@ -9,6 +9,7 @@ data/
 go-etl
 cmd/etl/etl
 *.exe
+dist/
 
 # IDE
 .idea/

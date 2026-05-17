@@ -1,13 +1,24 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"go-etl/model"
+)
 
 // Config is the root configuration.
 type Config struct {
 	ClickHouse  ClickHouseConfig `yaml:"clickhouse"`
 	IPDB        IPDBConfig       `yaml:"ip_db"`
+	Metrics     MetricsConfig    `yaml:"metrics"`
 	PipelineDir string           `yaml:"pipeline_dir"` // directory containing per-pipeline YAML files
 	Pipelines   []PipelineConfig `yaml:"pipelines"`    // inline pipelines (merged with pipeline_dir)
+}
+
+// MetricsConfig controls the built-in expvar metrics endpoint.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"` // default ":9090"
 }
 
 // ClickHouseConfig holds ClickHouse connection parameters.
@@ -16,11 +27,11 @@ type ClickHouseConfig struct {
 	Database      string        `yaml:"database"`
 	Username      string        `yaml:"username"`
 	Password      string        `yaml:"password"`
-	MaxOpenConns  int           `yaml:"max_open_conns"`  // default 10
-	MaxIdleConns  int           `yaml:"max_idle_conns"`  // default 5
+	MaxOpenConns  int           `yaml:"max_open_conns"` // default 10
+	MaxIdleConns  int           `yaml:"max_idle_conns"` // default 5
 	Debug         bool          `yaml:"debug"`
-	BatchSize     int           `yaml:"batch_size"`       // default 10000
-	FlushInterval time.Duration `yaml:"flush_interval"`   // default 5s
+	BatchSize     int           `yaml:"batch_size"`     // default 10000
+	FlushInterval time.Duration `yaml:"flush_interval"` // default 5s
 }
 
 // IPDBConfig holds IP database configuration.
@@ -35,27 +46,38 @@ type IPDBConfig struct {
 type PipelineConfig struct {
 	Name            string              `yaml:"name"`
 	WatchDir        string              `yaml:"watch_dir"`
-	FilePattern     string              `yaml:"file_pattern"` // "*" or "*.csv"
-	Delimiter       string              `yaml:"delimiter"`    // "|" or "|++|"
+	FilePattern     string              `yaml:"file_pattern"`      // "*" or "*.csv"
+	ReadyStrategy   string              `yaml:"ready_strategy"`    // atomic_rename, marker, or stable_size
+	TempSuffixes    []string            `yaml:"temp_suffixes"`     // ignored in-progress suffixes
+	MarkerSuffix    string              `yaml:"marker_suffix"`     // marker file suffix, usually ".ok"
+	StableDelay     time.Duration       `yaml:"stable_delay"`      // used by stable_size strategy
+	Delimiter       string              `yaml:"delimiter"`         // "|" or "|++|"
 	HasHeaderMeta   bool                `yaml:"has_header_meta"`   // first line is common info?
 	HeaderMetaKey   string              `yaml:"header_meta_key"`   // key name for first-line data
 	SkipHeaderLines int                 `yaml:"skip_header_lines"` // skip N lines at top (usually 1 if has_header_meta)
 	FieldNames      []string            `yaml:"field_names"`       // field names if no header in data
+	Fields          []model.FieldDef    `yaml:"fields"`            // output ClickHouse schema
 	Transformers    []TransformerConfig `yaml:"transformers"`
 	ClickHouseTable string              `yaml:"clickhouse_table"`
 	Workers         int                 `yaml:"workers"`    // transform worker count
 	BatchSize       int                 `yaml:"batch_size"` // override global batch size
+	RetryFailed     bool                `yaml:"retry_failed"`
+	MaxRetries      int                 `yaml:"max_retries"`
+	RetryInterval   time.Duration       `yaml:"retry_interval"`
+	DeadLetterDir   string              `yaml:"dead_letter_dir"`
+	ArchiveDir      string              `yaml:"archive_dir"`
+	CleanupMarker   bool                `yaml:"cleanup_marker"`
 }
 
 // TransformerConfig defines a transformer in the pipeline.
 type TransformerConfig struct {
-	Type        string            `yaml:"type"`
-	Fields      []string          `yaml:"fields,omitempty"`      // IP matching: which fields
-	LabelFields []string          `yaml:"label_fields,omitempty"` // IP matching: output geo fields
-	Field       string            `yaml:"field,omitempty"`       // Dict mapping: source field
-	Dict        map[string]string `yaml:"dict,omitempty"`        // Dict mapping: value → mapped value
-	DictFile    string            `yaml:"dict_file,omitempty"`   // Dict mapping: external CSV dict file
-	Config      map[string]interface{} `yaml:"config,omitempty"` // Custom transformer config
+	Type        string                 `yaml:"type"`
+	Fields      []string               `yaml:"fields,omitempty"`       // IP matching: which fields
+	LabelFields []string               `yaml:"label_fields,omitempty"` // IP matching: output geo fields
+	Field       string                 `yaml:"field,omitempty"`        // Dict mapping: source field
+	Dict        map[string]string      `yaml:"dict,omitempty"`         // Dict mapping: value → mapped value
+	DictFile    string                 `yaml:"dict_file,omitempty"`    // Dict mapping: external CSV dict file
+	Config      map[string]interface{} `yaml:"config,omitempty"`       // Custom transformer config
 }
 
 // DefaultClickHouseConfig returns sensible defaults.

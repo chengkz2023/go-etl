@@ -3,7 +3,6 @@ package watcher
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"go-etl/store"
@@ -18,20 +17,20 @@ type Poller struct {
 	store       *store.FileStore
 	pipeline    string
 	interval    time.Duration
+	ready       ReadyConfig
 	logger      *zap.Logger
 }
 
 // NewPoller creates a new directory poller.
-func NewPoller(pipeline, watchDir, filePattern string, s *store.FileStore, interval time.Duration, logger *zap.Logger) *Poller {
-	if filePattern == "" {
-		filePattern = "*"
-	}
+func NewPoller(pipeline, watchDir string, ready ReadyConfig, s *store.FileStore, interval time.Duration, logger *zap.Logger) *Poller {
+	ready = ready.normalize()
 	return &Poller{
 		watchDir:    watchDir,
-		filePattern: filePattern,
+		filePattern: ready.FilePattern,
 		store:       s,
 		pipeline:    pipeline,
 		interval:    interval,
+		ready:       ready,
 		logger:      logger,
 	}
 }
@@ -74,63 +73,61 @@ func (p *Poller) scan(fileCh chan<- string) {
 		return
 	}
 
+	now := time.Now()
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
-		matched, err := filepath.Match(p.filePattern, entry.Name())
+		matched, err := p.entryMayBeReady(entry.Name())
 		if err != nil || !matched {
 			continue
 		}
 
 		fullPath := filepath.Join(p.watchDir, entry.Name())
-		// Skip temporary / in-progress files
-		if strings.HasSuffix(entry.Name(), ".tmp") || strings.HasSuffix(entry.Name(), ".writing") {
-			continue
-		}
-
-		// Check bolt: only enqueue new/unknown files
-		status, err := p.store.GetStatus(p.pipeline, fullPath)
+		readyFile, err := p.ready.Check(fullPath, now)
 		if err != nil {
-			p.logger.Error("poller check file status failed",
+			p.logger.Error("poller ready check failed",
 				zap.String("file", fullPath),
 				zap.Error(err),
 			)
 			continue
 		}
-
-		if status != "unknown" && status != "pending" {
-			continue // already processing, done, or failed
+		if !readyFile.Ready {
+			continue
 		}
 
-		info, err := entry.Info()
+		enqueued, err := p.store.EnqueueReadyFile(p.pipeline, readyFile.Path, readyFile.Info.Size(), readyFile.Info.ModTime())
 		if err != nil {
-			p.logger.Error("poller get file info failed",
-				zap.String("file", fullPath),
+			p.logger.Error("poller enqueue file failed",
+				zap.String("file", readyFile.Path),
 				zap.Error(err),
 			)
 			continue
 		}
-
-		// Register as pending in bolt (atomic check-then-set)
-		if err := p.store.SetPending(p.pipeline, fullPath, info.Size(), info.ModTime()); err != nil {
-			p.logger.Error("poller set pending failed",
-				zap.String("file", fullPath),
-				zap.Error(err),
-			)
+		if !enqueued {
 			continue
 		}
 
 		p.logger.Info("poller discovered new file",
-			zap.String("file", fullPath),
+			zap.String("file", readyFile.Path),
 			zap.String("pipeline", p.pipeline),
 		)
 
 		select {
-		case fileCh <- fullPath:
+		case fileCh <- readyFile.Path:
 		case <-time.After(5 * time.Second):
-			p.logger.Warn("poller file channel full, dropping file", zap.String("file", fullPath))
+			p.logger.Warn("poller file channel full, dropping file", zap.String("file", readyFile.Path))
 		}
 	}
+}
+
+func (p *Poller) entryMayBeReady(name string) (bool, error) {
+	if p.ready.Strategy == ReadyMarker {
+		if p.ready.MarkerSuffix == "" {
+			return false, nil
+		}
+		return filepath.Match(p.filePattern+p.ready.MarkerSuffix, name)
+	}
+	return filepath.Match(p.filePattern, name)
 }

@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"go-etl/config"
 	"go-etl/iputil"
+	"go-etl/metrics"
 	"go-etl/pipeline"
 	"go-etl/store"
 )
@@ -32,6 +35,13 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Fatal("failed to load config", zap.Error(err))
+	}
+	var metricsServer interface {
+		Shutdown(context.Context) error
+	}
+	if cfg.Metrics.Enabled {
+		metricsServer = metrics.StartServer(cfg.Metrics.Addr)
+		logger.Info("metrics server started", zap.String("addr", cfg.Metrics.Addr), zap.String("path", "/debug/vars"))
 	}
 
 	// Open file status store
@@ -90,6 +100,13 @@ func main() {
 		p.Shutdown()
 	}
 	wg.Wait()
+	if metricsServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsServer.Shutdown(ctx); err != nil {
+			logger.Error("metrics server shutdown failed", zap.Error(err))
+		}
+	}
 
 	logger.Info("go-etl stopped")
 }

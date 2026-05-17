@@ -1,0 +1,27 @@
+clickhouse:
+  hosts:
+    - "127.0.0.1:9000"
+  database: cdr
+  username: default
+  password: ""
+  max_open_conns: 5
+  max_idle_conns: 2
+  debug: false
+  batch_size: 2
+  flush_interval: 2s
+
+metrics:
+  enabled: true
+  addr: ":9090"
+
+ip_db:
+  type: csv
+  path: ./examples/full-test/ipdb/ipdb.csv
+  columns:
+    - country
+    - province
+    - city
+    - isp
+  reload_interval: 3600s
+
+pipeline_dir: ./pipelines

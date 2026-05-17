@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type ClickHouseWriter struct {
 	conn          driver.Conn
 	table         string
 	fieldNames    []string
+	converter     *rowConverter
 	batchSize     int
 	flushInterval time.Duration
 
@@ -29,7 +31,7 @@ type ClickHouseWriter struct {
 }
 
 // NewClickHouseWriter creates a new writer connected to ClickHouse.
-func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string, batchSize int, flushInterval time.Duration) (*ClickHouseWriter, error) {
+func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string, fields []model.FieldDef, batchSize int, flushInterval time.Duration) (*ClickHouseWriter, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: cfg.Hosts,
 		Auth: clickhouse.Auth{
@@ -60,6 +62,10 @@ func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan struct{}),
+	}
+	if len(fields) > 0 {
+		w.converter = newRowConverter(fields)
+		w.fieldNames = w.converter.fieldNames()
 	}
 
 	// Start background flusher
@@ -124,15 +130,15 @@ func (w *ClickHouseWriter) insert(rows []model.Row) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	batch, err := w.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s", w.table))
+	batch, err := w.conn.PrepareBatch(ctx, w.insertSQL())
 	if err != nil {
 		return fmt.Errorf("prepare batch: %w", err)
 	}
 
 	for _, row := range rows {
-		values := make([]interface{}, len(w.fieldNames))
-		for i, name := range w.fieldNames {
-			values[i] = row[name]
+		values, err := w.rowValues(row)
+		if err != nil {
+			return err
 		}
 		if err := batch.Append(values...); err != nil {
 			return fmt.Errorf("append to batch: %w", err)
@@ -144,6 +150,25 @@ func (w *ClickHouseWriter) insert(rows []model.Row) error {
 	}
 
 	return nil
+}
+
+func (w *ClickHouseWriter) insertSQL() string {
+	if len(w.fieldNames) == 0 {
+		return fmt.Sprintf("INSERT INTO %s", w.table)
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s)", w.table, strings.Join(w.fieldNames, ", "))
+}
+
+func (w *ClickHouseWriter) rowValues(row model.Row) ([]interface{}, error) {
+	if w.converter != nil {
+		return w.converter.values(row)
+	}
+
+	values := make([]interface{}, len(w.fieldNames))
+	for i, name := range w.fieldNames {
+		values[i] = row[name]
+	}
+	return values, nil
 }
 
 // flushLoop periodically flushes the buffer.

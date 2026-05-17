@@ -41,13 +41,35 @@ func NewReader(delimiter string, fieldNames []string, hasHeaderRow bool, headerM
 	return r
 }
 
+// SetSkipLines configures how many non-empty lines are skipped before parsing.
+func (r *Reader) SetSkipLines(skipLines int) {
+	if skipLines < 0 {
+		skipLines = 0
+	}
+	r.skipLines = skipLines
+}
+
 // ReadAll reads and parses all rows from an io.Reader.
 func (r *Reader) ReadAll(rd io.Reader) ([]model.Row, error) {
+	var rows []model.Row
+	err := r.ReadBatches(rd, 10000, func(batch []model.Row) error {
+		rows = append(rows, batch...)
+		return nil
+	})
+	return rows, err
+}
+
+// ReadBatches reads rows from an io.Reader and calls onBatch for each batch.
+func (r *Reader) ReadBatches(rd io.Reader, batchSize int, onBatch func([]model.Row) error) error {
+	if batchSize <= 0 {
+		batchSize = 10000
+	}
+
 	scanner := bufio.NewScanner(rd)
 	// Increase buffer for long lines (max 16MB per line)
 	scanner.Buffer(make([]byte, 0, 256*1024), 16*1024*1024)
 
-	var rows []model.Row
+	batch := make([]model.Row, 0, batchSize)
 	lineNum := 0
 
 	for scanner.Scan() {
@@ -69,7 +91,7 @@ func (r *Reader) ReadAll(rd io.Reader) ([]model.Row, error) {
 
 		row, err := r.parseLine(line)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNum, err)
+			return fmt.Errorf("line %d: %w", lineNum, err)
 		}
 
 		// Merge header meta into every data row
@@ -77,14 +99,26 @@ func (r *Reader) ReadAll(rd io.Reader) ([]model.Row, error) {
 			row[k] = v
 		}
 
-		rows = append(rows, row)
+		batch = append(batch, row)
+		if len(batch) >= batchSize {
+			if err := onBatch(batch); err != nil {
+				return err
+			}
+			batch = make([]model.Row, 0, batchSize)
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan file: %w", err)
+		return fmt.Errorf("scan file: %w", err)
 	}
 
-	return rows, nil
+	if len(batch) > 0 {
+		if err := onBatch(batch); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (r *Reader) parseLine(line string) (model.Row, error) {

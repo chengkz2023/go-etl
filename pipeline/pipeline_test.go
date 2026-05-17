@@ -1,0 +1,118 @@
+package pipeline
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"go-etl/config"
+)
+
+func TestMoveToDeadLetter(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "a.csv")
+	deadDir := filepath.Join(dir, "dead")
+	if err := os.WriteFile(sourcePath, []byte("row\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{cfg: config.PipelineConfig{DeadLetterDir: deadDir}}
+	targetPath, err := p.moveToDeadLetter(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetPath != filepath.Join(deadDir, "a.csv") {
+		t.Fatalf("target = %q", targetPath)
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("source still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestMoveToDeadLetterWithoutDir(t *testing.T) {
+	p := &Pipeline{}
+	targetPath, err := p.moveToDeadLetter("a.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetPath != "" {
+		t.Fatalf("target = %q, want empty", targetPath)
+	}
+}
+
+func TestMoveFileToDirRenamesOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "a.csv")
+	targetDir := filepath.Join(dir, "archive")
+	targetPath := filepath.Join(targetDir, "a.csv")
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	movedPath, err := moveFileToDir(sourcePath, targetDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedPath == targetPath {
+		t.Fatal("expected conflict-safe target path")
+	}
+	if _, err := os.Stat(movedPath); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(targetPath); err != nil || string(data) != "old\n" {
+		t.Fatalf("original target changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestCleanupMarker(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "a.csv")
+	markerPath := dataPath + ".ok"
+	if err := os.WriteFile(dataPath, []byte("row\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{cfg: config.PipelineConfig{
+		ReadyStrategy: "marker",
+		MarkerSuffix:  ".ok",
+	}}
+	if err := p.cleanupMarker(dataPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestCleanupMarkerIgnoresNonMarkerStrategy(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "a.csv")
+	markerPath := dataPath + ".ok"
+	if err := os.WriteFile(markerPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{cfg: config.PipelineConfig{
+		ReadyStrategy: "atomic_rename",
+		MarkerSuffix:  ".ok",
+	}}
+	if err := p.cleanupMarker(dataPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatal(err)
+	}
+}

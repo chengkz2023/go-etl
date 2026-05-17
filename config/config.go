@@ -72,6 +72,9 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Metrics.Enabled && c.Metrics.Addr == "" {
+		c.Metrics.Addr = ":9090"
+	}
 	if c.ClickHouse.MaxOpenConns == 0 {
 		c.ClickHouse.MaxOpenConns = 10
 	}
@@ -97,6 +100,24 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Pipelines[i].Delimiter == "" {
 			c.Pipelines[i].Delimiter = "|"
+		}
+		if c.Pipelines[i].ReadyStrategy == "" {
+			c.Pipelines[i].ReadyStrategy = "atomic_rename"
+		}
+		if len(c.Pipelines[i].TempSuffixes) == 0 {
+			c.Pipelines[i].TempSuffixes = []string{".tmp", ".writing"}
+		}
+		if c.Pipelines[i].MarkerSuffix == "" {
+			c.Pipelines[i].MarkerSuffix = ".ok"
+		}
+		if c.Pipelines[i].StableDelay == 0 {
+			c.Pipelines[i].StableDelay = 10_000_000_000 // 10s in ns
+		}
+		if c.Pipelines[i].MaxRetries == 0 {
+			c.Pipelines[i].MaxRetries = 3
+		}
+		if c.Pipelines[i].RetryInterval == 0 {
+			c.Pipelines[i].RetryInterval = 60_000_000_000 // 60s in ns
 		}
 	}
 }
@@ -128,6 +149,28 @@ func (c *Config) Validate() error {
 		}
 		if p.ClickHouseTable == "" {
 			return fmt.Errorf("pipeline %q: clickhouse_table is required", p.Name)
+		}
+		if p.MaxRetries < 0 {
+			return fmt.Errorf("pipeline %q: max_retries must be >= 0", p.Name)
+		}
+		if p.RetryInterval < 0 {
+			return fmt.Errorf("pipeline %q: retry_interval must be >= 0", p.Name)
+		}
+		if len(p.FieldNames) == 0 {
+			return fmt.Errorf("pipeline %q: field_names is required", p.Name)
+		}
+		for j, f := range p.Fields {
+			if f.Name == "" {
+				return fmt.Errorf("pipeline %q: fields[%d].name is required", p.Name, j)
+			}
+			if f.Type == "" {
+				return fmt.Errorf("pipeline %q: fields[%d].type is required", p.Name, j)
+			}
+		}
+		switch p.ReadyStrategy {
+		case "atomic_rename", "marker", "stable_size":
+		default:
+			return fmt.Errorf("pipeline %q: ready_strategy must be atomic_rename, marker, or stable_size", p.Name)
 		}
 	}
 	return nil

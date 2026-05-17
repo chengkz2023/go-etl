@@ -12,6 +12,22 @@ field_names:
   - url
   - status_code
   - bytes_sent
+fields:
+  - name: timestamp
+    type: DateTime
+    layout: "2006-01-02 15:04:05"
+  - name: client_ip
+    type: IPv4
+  - name: server_ip
+    type: IPv4
+  - name: method
+    type: LowCardinality(String)
+  - name: url
+    type: String
+  - name: status_code
+    type: UInt16
+  - name: bytes_sent
+    type: UInt64
 transformers:
   - type: ip_matcher
     fields:
@@ -29,3 +45,9 @@ transformers:
 clickhouse_table: raw.http_log
 workers: 4
 batch_size: 5000
+retry_failed: true
+max_retries: 3
+retry_interval: 60s
+dead_letter_dir: /data/probe/dead/http
+archive_dir: /data/probe/archive/http
+cleanup_marker: true
