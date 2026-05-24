@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go-etl/config"
+	"go-etl/model"
 )
 
 func TestMoveToDeadLetter(t *testing.T) {
@@ -114,5 +115,24 @@ func TestCleanupMarkerIgnoresNonMarkerStrategy(t *testing.T) {
 	}
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInputFieldNamesSkipsGeneratedFields(t *testing.T) {
+	got := inputFieldNames([]model.FieldDef{
+		{Name: "event_time", Type: "DateTime"},
+		{Name: "src_ip", Type: "IPv4"},
+		{Name: "src_geo_city", Type: "String", Generated: true},
+		{Name: "method_name", Source: "method", Type: "String"},
+	})
+	want := []string{"event_time", "src_ip", "method"}
+
+	if len(got) != len(want) {
+		t.Fatalf("field count = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("field[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

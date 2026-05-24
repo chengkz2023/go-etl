@@ -9,16 +9,6 @@ archive_dir: ./examples/full-test/archive/http
 dead_letter_dir: ./examples/full-test/dead/http
 delimiter: "|++|"
 has_header_meta: false
-field_names:
-  - event_time
-  - client_ip
-  - server_ip
-  - method
-  - url
-  - status_code
-  - bytes_sent
-  - probe_id
-  - region
 fields:
   - name: event_time
     type: DateTime
@@ -41,20 +31,28 @@ fields:
     type: LowCardinality(String)
   - name: client_geo_country
     type: LowCardinality(String)
+    generated: true
   - name: client_geo_province
     type: LowCardinality(String)
+    generated: true
   - name: client_geo_city
     type: LowCardinality(String)
+    generated: true
   - name: client_geo_isp
     type: LowCardinality(String)
+    generated: true
   - name: server_geo_country
     type: LowCardinality(String)
+    generated: true
   - name: server_geo_province
     type: LowCardinality(String)
+    generated: true
   - name: server_geo_city
     type: LowCardinality(String)
+    generated: true
   - name: server_geo_isp
     type: LowCardinality(String)
+    generated: true
 transformers:
   - type: ip_matcher
     fields:

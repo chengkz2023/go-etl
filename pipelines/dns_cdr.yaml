@@ -1,16 +1,28 @@
-# DNS话单管道
+# DNS CDR pipeline
 name: dns_cdr
 watch_dir: /data/probe/dns
 file_pattern: "*.csv"
 delimiter: "|"
-has_header_meta: true          # 首行为设备公共信息
-field_names:
-  - timestamp
-  - src_ip
-  - dst_ip
-  - domain
-  - dns_type
-  - response_code
+has_header_meta: true
+header_fields:
+  - name: probe_id
+    type: LowCardinality(String)
+  - name: region
+    type: LowCardinality(String)
+fields:
+  - name: timestamp
+    type: DateTime
+    layout: "2006-01-02 15:04:05"
+  - name: src_ip
+    type: IPv4
+  - name: dst_ip
+    type: IPv4
+  - name: domain
+    type: String
+  - name: dns_type
+    type: LowCardinality(String)
+  - name: response_code
+    type: UInt16
 transformers:
   - type: ip_matcher
     fields:

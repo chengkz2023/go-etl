@@ -44,7 +44,22 @@ pipelines:
     watch_dir: /data/probe/dns
     delimiter: "|"
     has_header_meta: true
-    field_names: [timestamp, src_ip, dst_ip, domain, dns_type]
+    header_fields:
+      - name: probe_id
+        type: LowCardinality(String)
+      - name: region
+        type: LowCardinality(String)
+    fields:
+      - name: timestamp
+        type: DateTime
+      - name: src_ip
+        type: IPv4
+      - name: dst_ip
+        type: IPv4
+      - name: domain
+        type: String
+      - name: dns_type
+        type: LowCardinality(String)
     transformers:
       - type: ip_matcher
         fields: [src_ip, dst_ip]

@@ -19,8 +19,12 @@ metrics:
 pipelines:
   - name: dns
     watch_dir: /data/dns
-    field_names: [timestamp, src_ip]
     clickhouse_table: raw.dns
+    fields:
+      - name: timestamp
+        type: DateTime
+      - name: src_ip
+        type: IPv4
 `)
 	if err := os.WriteFile(configPath, data, 0644); err != nil {
 		t.Fatal(err)
@@ -61,9 +65,11 @@ clickhouse:
 pipelines:
   - name: dns
     watch_dir: /data/dns
-    field_names: [timestamp, src_ip]
     clickhouse_table: raw.dns
     ready_strategy: guess
+    fields:
+      - name: timestamp
+        type: DateTime
 `)
 	if err := os.WriteFile(configPath, data, 0644); err != nil {
 		t.Fatal(err)
@@ -84,7 +90,6 @@ clickhouse:
 pipelines:
   - name: dns
     watch_dir: /data/dns
-    field_names: [timestamp, src_ip]
     clickhouse_table: raw.dns
     fields:
       - name: timestamp
@@ -108,9 +113,11 @@ clickhouse:
 pipelines:
   - name: dns
     watch_dir: /data/dns
-    field_names: [timestamp, src_ip]
     clickhouse_table: raw.dns
     max_retries: -1
+    fields:
+      - name: timestamp
+        type: DateTime
 `)
 	if err := os.WriteFile(configPath, data, 0644); err != nil {
 		t.Fatal(err)
@@ -118,6 +125,31 @@ pipelines:
 
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected invalid max_retries error")
+	}
+}
+
+func TestLoadRequiresHeaderFields(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+clickhouse:
+  hosts: ["127.0.0.1:9000"]
+  database: cdr
+pipelines:
+  - name: dns
+    watch_dir: /data/dns
+    clickhouse_table: raw.dns
+    has_header_meta: true
+    fields:
+      - name: timestamp
+        type: DateTime
+`)
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected missing header_fields error")
 	}
 }
 

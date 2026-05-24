@@ -12,7 +12,7 @@ func TestReadBatchesSkipsLinesAndMergesHeaderMeta(t *testing.T) {
 	r.SetSkipLines(1)
 
 	var batches [][]model.Row
-	err := r.ReadBatches(strings.NewReader("meta=ignored\n1|10.0.0.1\n2|10.0.0.2\n3|10.0.0.3\n"), 2, func(batch []model.Row) error {
+	err := r.ReadBatches(strings.NewReader("probe-1\n1|10.0.0.1\n2|10.0.0.2\n3|10.0.0.3\n"), 2, func(batch []model.Row) error {
 		copied := append([]model.Row(nil), batch...)
 		batches = append(batches, copied)
 		return nil
@@ -32,6 +32,17 @@ func TestReadBatchesSkipsLinesAndMergesHeaderMeta(t *testing.T) {
 	}
 	if batches[0][0]["device"] != "probe-1" {
 		t.Fatalf("header meta was not merged: %#v", batches[0][0])
+	}
+}
+
+func TestParseHeaderMetaUsesConfiguredFieldNames(t *testing.T) {
+	meta := ParseHeaderMeta("probe-1|south", "|", []string{"probe_id", "region", "vendor"})
+
+	if meta["probe_id"] != "probe-1" || meta["region"] != "south" || meta["vendor"] != "" {
+		t.Fatalf("unexpected header meta: %#v", meta)
+	}
+	if _, ok := meta["meta_0"]; ok {
+		t.Fatalf("header meta should not create positional meta_N fields: %#v", meta)
 	}
 }
 

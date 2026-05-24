@@ -131,8 +131,8 @@ pipeline_dir: pipelines
 | `delimiter` | 字段分隔符，支持单字符和多字符 |
 | `has_header_meta` | 首个非空行是否作为公共元数据 |
 | `skip_header_lines` | 额外跳过的非空行数 |
-| `field_names` | 输入文件字段名，按文件列顺序配置 |
-| `fields` | ClickHouse 输出字段 schema，决定写入列和类型转换 |
+| `header_fields` | 首行公共字段 schema，按首行列顺序配置 |
+| `fields` | 数据行和派生字段 schema，决定输入列顺序、写入列和类型转换；派生字段需设置 `generated: true` |
 | `transformers` | 转换链配置 |
 | `clickhouse_table` | 目标表名，建议写完整库表名 |
 | `workers` | 文件级 worker 数 |
@@ -631,7 +631,7 @@ go test ./...
 - 目前是单进程架构，不是多实例分布式消费。同一个目录如果启动多个 ETL 实例，bbolt 状态库不能跨进程共享协调。
 - 多字符分隔符目前不处理引号内分隔符，只做 `strings.Split`。
 - `ip_db.reload_interval` 已在配置中存在，但当前没有实现热加载。
-- `HeaderMetaKey` 字段存在，但当前 header meta 直接按 key=value 或 `meta_N` 合并，没有用该字段包裹。
+- header meta 使用 `header_fields` 按位置映射首行公共字段，不再解析 `key=value` 或生成 `meta_N` 字段。
 - writer 没有实现 ClickHouse async insert 配置。
 - 失败重试恢复发生在服务启动时；当前没有后台定时把到期 failed 自动重新入队。
 - 指标是 expvar 计数器，不是 Prometheus 原生格式。
@@ -653,7 +653,7 @@ go test ./...
 ## 18. 开发约定
 
 - 新增文档和代码注释默认使用中文。
-- 保持 pipeline 配置向后兼容，已有 `field_names` 语义不要破坏。
+- pipeline 字段配置已收敛为 `header_fields` 和 `fields`；派生字段通过 `generated: true` 排除在输入列之外。
 - 文件处理成功后避免重新标记 failed，防止 ClickHouse 重复入库。
 - 对文件状态变更优先使用 `FileStore` 的原子方法。
 - 修改 ClickHouse 写入字段时，必须同步检查 `fields` 顺序和目标表列类型。

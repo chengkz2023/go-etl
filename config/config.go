@@ -156,8 +156,19 @@ func (c *Config) Validate() error {
 		if p.RetryInterval < 0 {
 			return fmt.Errorf("pipeline %q: retry_interval must be >= 0", p.Name)
 		}
-		if len(p.FieldNames) == 0 {
-			return fmt.Errorf("pipeline %q: field_names is required", p.Name)
+		if len(p.Fields) == 0 {
+			return fmt.Errorf("pipeline %q: fields is required", p.Name)
+		}
+		if p.HasHeaderMeta && len(p.HeaderFields) == 0 {
+			return fmt.Errorf("pipeline %q: header_fields is required when has_header_meta is true", p.Name)
+		}
+		for j, f := range p.HeaderFields {
+			if f.Name == "" {
+				return fmt.Errorf("pipeline %q: header_fields[%d].name is required", p.Name, j)
+			}
+			if f.Type == "" {
+				return fmt.Errorf("pipeline %q: header_fields[%d].type is required", p.Name, j)
+			}
 		}
 		for j, f := range p.Fields {
 			if f.Name == "" {

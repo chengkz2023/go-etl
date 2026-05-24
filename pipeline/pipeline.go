@@ -56,6 +56,8 @@ func New(
 	}
 
 	// Build ClickHouse writer
+	writeFields := append([]model.FieldDef{}, cfg.HeaderFields...)
+	writeFields = append(writeFields, cfg.Fields...)
 	chWriter, err := writer.NewClickHouseWriter(
 		writer.ClickHouseConfig{
 			Hosts:        chCfg.Hosts,
@@ -67,8 +69,8 @@ func New(
 			Debug:        chCfg.Debug,
 		},
 		cfg.ClickHouseTable,
-		cfg.FieldNames,
-		cfg.Fields,
+		fieldNames(writeFields),
+		writeFields,
 		cfg.BatchSize,
 		chCfg.FlushInterval,
 	)
@@ -217,7 +219,7 @@ func (p *Pipeline) processFile(filePath string) {
 		f.Seek(0, 0)
 	}
 
-	rdr := reader.NewReader(p.cfg.Delimiter, p.cfg.FieldNames, false, headerMeta)
+	rdr := reader.NewReader(p.cfg.Delimiter, inputFieldNames(p.cfg.Fields), false, headerMeta)
 	rdr.SetSkipLines(skipLines)
 
 	batchSize := p.cfg.BatchSize
@@ -382,9 +384,32 @@ func (p *Pipeline) readHeaderMeta(f *os.File) model.Row {
 		if line == "" {
 			continue
 		}
-		return reader.ParseHeaderMeta(line, p.cfg.Delimiter)
+		return reader.ParseHeaderMeta(line, p.cfg.Delimiter, fieldNames(p.cfg.HeaderFields))
 	}
 	return model.Row{}
+}
+
+func fieldNames(fields []model.FieldDef) []string {
+	names := make([]string, len(fields))
+	for i, field := range fields {
+		names[i] = field.Name
+	}
+	return names
+}
+
+func inputFieldNames(fields []model.FieldDef) []string {
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field.Generated {
+			continue
+		}
+		if field.Source != "" {
+			names = append(names, field.Source)
+			continue
+		}
+		names = append(names, field.Name)
+	}
+	return names
 }
 
 // Shutdown gracefully stops the pipeline.

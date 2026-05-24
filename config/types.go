@@ -53,9 +53,8 @@ type PipelineConfig struct {
 	StableDelay     time.Duration       `yaml:"stable_delay"`      // used by stable_size strategy
 	Delimiter       string              `yaml:"delimiter"`         // "|" or "|++|"
 	HasHeaderMeta   bool                `yaml:"has_header_meta"`   // first line is common info?
-	HeaderMetaKey   string              `yaml:"header_meta_key"`   // key name for first-line data
+	HeaderFields    []model.FieldDef    `yaml:"header_fields"`     // fields read from first-line common info
 	SkipHeaderLines int                 `yaml:"skip_header_lines"` // skip N lines at top (usually 1 if has_header_meta)
-	FieldNames      []string            `yaml:"field_names"`       // field names if no header in data
 	Fields          []model.FieldDef    `yaml:"fields"`            // output ClickHouse schema
 	Transformers    []TransformerConfig `yaml:"transformers"`
 	ClickHouseTable string              `yaml:"clickhouse_table"`

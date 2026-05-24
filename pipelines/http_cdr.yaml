@@ -4,14 +4,6 @@ watch_dir: /data/probe/http
 file_pattern: "*.log"
 delimiter: "|++|"
 has_header_meta: false
-field_names:
-  - timestamp
-  - client_ip
-  - server_ip
-  - method
-  - url
-  - status_code
-  - bytes_sent
 fields:
   - name: timestamp
     type: DateTime

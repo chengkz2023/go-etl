@@ -183,9 +183,9 @@ func splitQuoted(line string, delim byte) []string {
 	return fields
 }
 
-// ParseHeaderMeta parses the first line as header meta (device info).
-// The line uses the same delimiter. Supports key=value or positional fields.
-func ParseHeaderMeta(line, delimiter string) model.Row {
+// ParseHeaderMeta parses the first line as positional header meta fields.
+// The line uses the same delimiter as data rows.
+func ParseHeaderMeta(line, delimiter string, fieldNames []string) model.Row {
 	meta := make(model.Row)
 	if line == "" {
 		return meta
@@ -198,18 +198,11 @@ func ParseHeaderMeta(line, delimiter string) model.Row {
 		parts = strings.Split(line, delimiter)
 	}
 
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		// Try key=value split
-		if idx := strings.Index(part, "="); idx > 0 {
-			key := strings.TrimSpace(part[:idx])
-			val := strings.TrimSpace(part[idx+1:])
-			meta[key] = val
+	for i, name := range fieldNames {
+		if i < len(parts) {
+			meta[name] = strings.TrimSpace(parts[i])
 		} else {
-			meta[fmt.Sprintf("meta_%d", i)] = part
+			meta[name] = ""
 		}
 	}
 	return meta
