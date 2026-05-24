@@ -1,0 +1,75 @@
+name: stress_dns_cdr
+watch_dir: ./watch/dns
+file_pattern: "*.cdr"
+ready_strategy: marker
+marker_suffix: ".ok"
+cleanup_marker: true
+archive_dir: ./archive/dns
+dead_letter_dir: ./dead/dns
+delimiter: "|"
+has_header_meta: true
+header_fields:
+  - name: probe_id
+    type: LowCardinality(String)
+  - name: region
+    type: LowCardinality(String)
+fields:
+  - name: event_time
+    type: DateTime
+    layout: "2006-01-02 15:04:05"
+  - name: src_ip
+    type: IPv4
+  - name: dst_ip
+    type: IPv4
+  - name: domain
+    type: String
+  - name: dns_type
+    type: LowCardinality(String)
+  - name: response_code
+    type: UInt16
+  - name: src_geo_country
+    type: LowCardinality(String)
+    generated: true
+  - name: src_geo_province
+    type: LowCardinality(String)
+    generated: true
+  - name: src_geo_city
+    type: LowCardinality(String)
+    generated: true
+  - name: src_geo_isp
+    type: LowCardinality(String)
+    generated: true
+  - name: dst_geo_country
+    type: LowCardinality(String)
+    generated: true
+  - name: dst_geo_province
+    type: LowCardinality(String)
+    generated: true
+  - name: dst_geo_city
+    type: LowCardinality(String)
+    generated: true
+  - name: dst_geo_isp
+    type: LowCardinality(String)
+    generated: true
+transformers:
+  - type: ip_matcher
+    fields:
+      - src_ip
+      - dst_ip
+    label_fields:
+      - src_geo
+      - dst_geo
+  - type: dict_mapper
+    field: dns_type
+    dict:
+      "1": "A"
+      "2": "NS"
+      "5": "CNAME"
+      "15": "MX"
+      "28": "AAAA"
+clickhouse_table: cdr.stress_dns_cdr
+workers: 1
+batch_size: 10000
+retry_failed: true
+max_retries: 2
+retry_interval: 5s

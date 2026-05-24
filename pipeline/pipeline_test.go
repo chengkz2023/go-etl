@@ -1,12 +1,17 @@
 package pipeline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"go.uber.org/zap/zaptest"
 
 	"go-etl/config"
 	"go-etl/model"
+	"go-etl/store"
 )
 
 func TestMoveToDeadLetter(t *testing.T) {
@@ -134,5 +139,50 @@ func TestInputFieldNamesSkipsGeneratedFields(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("field[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestRetryDispatcherDispatchesRetryableFailedFiles(t *testing.T) {
+	s, err := store.NewFileStore(filepath.Join(t.TempDir(), "status.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	filePath := "/data/a.csv"
+	if _, err := s.EnqueueReadyFile("dns", filePath, 12, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimPending("dns", filePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFailedForRetry("dns", filePath, "boom", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{
+		cfg: config.PipelineConfig{
+			Name:          "dns",
+			RetryFailed:   true,
+			MaxRetries:    3,
+			RetryInterval: time.Millisecond,
+		},
+		store:  s,
+		logger: zaptest.NewLogger(t),
+	}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	defer p.cancel()
+
+	workCh := make(chan string, 1)
+	p.wg.Add(1)
+	go p.retryDispatcher(workCh)
+
+	select {
+	case got := <-workCh:
+		if got != filePath {
+			t.Fatalf("retry file = %q, want %q", got, filePath)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for retry file")
 	}
 }

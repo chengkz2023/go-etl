@@ -1,0 +1,72 @@
+name: stress_http_cdr
+watch_dir: ./watch/http
+file_pattern: "*.log"
+ready_strategy: atomic_rename
+temp_suffixes:
+  - ".tmp"
+  - ".writing"
+archive_dir: ./archive/http
+dead_letter_dir: ./dead/http
+delimiter: "|++|"
+has_header_meta: false
+fields:
+  - name: event_time
+    type: DateTime
+    layout: "2006-01-02 15:04:05"
+  - name: client_ip
+    type: IPv4
+  - name: server_ip
+    type: IPv4
+  - name: method
+    type: LowCardinality(String)
+  - name: url
+    type: String
+  - name: status_code
+    type: UInt16
+  - name: bytes_sent
+    type: UInt64
+  - name: probe_id
+    type: LowCardinality(String)
+  - name: region
+    type: LowCardinality(String)
+  - name: client_geo_country
+    type: LowCardinality(String)
+    generated: true
+  - name: client_geo_province
+    type: LowCardinality(String)
+    generated: true
+  - name: client_geo_city
+    type: LowCardinality(String)
+    generated: true
+  - name: client_geo_isp
+    type: LowCardinality(String)
+    generated: true
+  - name: server_geo_country
+    type: LowCardinality(String)
+    generated: true
+  - name: server_geo_province
+    type: LowCardinality(String)
+    generated: true
+  - name: server_geo_city
+    type: LowCardinality(String)
+    generated: true
+  - name: server_geo_isp
+    type: LowCardinality(String)
+    generated: true
+transformers:
+  - type: ip_matcher
+    fields:
+      - client_ip
+      - server_ip
+    label_fields:
+      - client_geo
+      - server_geo
+  - type: dict_mapper
+    field: method
+    dict_file: ./dict/http_method.csv
+clickhouse_table: cdr.stress_http_cdr
+workers: 1
+batch_size: 10000
+retry_failed: true
+max_retries: 2
+retry_interval: 5s

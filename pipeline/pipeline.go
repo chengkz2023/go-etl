@@ -164,6 +164,11 @@ func (p *Pipeline) Run() error {
 		}
 	}()
 
+	if p.cfg.RetryFailed {
+		p.wg.Add(1)
+		go p.retryDispatcher(workCh)
+	}
+
 	<-p.ctx.Done()
 	p.logger.Info("pipeline shutting down")
 	w.Stop()
@@ -179,6 +184,49 @@ func (p *Pipeline) worker(workCh <-chan string) {
 	defer p.wg.Done()
 	for filePath := range workCh {
 		p.processFile(filePath)
+	}
+}
+
+func (p *Pipeline) retryDispatcher(workCh chan<- string) {
+	defer p.wg.Done()
+
+	interval := p.cfg.RetryInterval
+	if interval <= 0 || interval > 10*time.Second {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			retryable, err := p.store.ResetRetryableFailedToPending(p.cfg.Name, p.cfg.MaxRetries, time.Now())
+			if err != nil {
+				p.logger.Error("recover failed files for retry", zap.Error(err))
+				metrics.Inc(p.cfg.Name, "retry_recover_errors_total", 1)
+				continue
+			}
+			if retryable == 0 {
+				continue
+			}
+
+			pending, err := p.store.ListPending(p.cfg.Name)
+			if err != nil {
+				p.logger.Error("list retry pending files", zap.Error(err))
+				metrics.Inc(p.cfg.Name, "retry_list_errors_total", 1)
+				continue
+			}
+			p.logger.Info("dispatching retry files", zap.Int("files", len(pending)))
+			for _, rec := range pending {
+				select {
+				case workCh <- rec.FilePath:
+				case <-p.ctx.Done():
+					return
+				}
+			}
+		}
 	}
 }
 

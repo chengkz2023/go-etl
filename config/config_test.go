@@ -165,3 +165,19 @@ func TestLoadFullFixture(t *testing.T) {
 		t.Fatalf("unexpected pipelines: %#v", cfg.Pipelines)
 	}
 }
+
+func TestLoadStressFixture(t *testing.T) {
+	cfg, err := Load("../examples/stress-test/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Pipelines) != 2 {
+		t.Fatalf("pipeline count = %d, want 2", len(cfg.Pipelines))
+	}
+	if cfg.Pipelines[0].Name != "stress_dns_cdr" || cfg.Pipelines[1].Name != "stress_http_cdr" {
+		t.Fatalf("unexpected pipelines: %#v", cfg.Pipelines)
+	}
+	if len(cfg.Pipelines[0].HeaderFields) == 0 {
+		t.Fatal("stress DNS pipeline should define header_fields")
+	}
+}

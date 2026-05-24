@@ -1,0 +1,9 @@
+start_ip,end_ip,country,province,city,isp
+10.10.0.0,10.10.255.255,CN,Guangdong,Shenzhen,PrivateNet
+10.20.0.0,10.20.255.255,CN,Shanghai,Shanghai,PrivateNet
+172.16.0.0,172.16.255.255,CN,Beijing,Beijing,PrivateNet
+192.168.1.0,192.168.1.255,CN,Zhejiang,Hangzhou,PrivateNet
+8.8.8.0,8.8.8.255,US,California,MountainView,Google
+1.1.1.0,1.1.1.255,AU,Queensland,Brisbane,Cloudflare
+93.184.216.0,93.184.216.255,US,California,LosAngeles,Edgecast
+203.0.113.0,203.0.113.255,TEST,Example,ExampleCity,ExampleISP
