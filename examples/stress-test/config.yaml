@@ -7,12 +7,17 @@ clickhouse:
   max_open_conns: 16
   max_idle_conns: 8
   debug: false
-  batch_size: 10000
-  flush_interval: 2s
+  batch_size: 50000
+  flush_interval: 1s
+  write_timeout: 60s
+  async_insert:
+    enabled: false
+    wait: true
 
 metrics:
   enabled: true
   addr: ":9090"
+  prometheus_enabled: false
 
 ip_db:
   type: csv
@@ -23,5 +28,6 @@ ip_db:
     - city
     - isp
   reload_interval: 3600s
+  cache_size: 4096
 
 pipeline_dir: ./pipelines

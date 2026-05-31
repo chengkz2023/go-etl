@@ -2,6 +2,9 @@ package metrics
 
 import (
 	"expvar"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,5 +30,18 @@ func TestObserveDuration(t *testing.T) {
 	}
 	if got := v.String(); got != "1500" {
 		t.Fatalf("duration = %s, want 1500", got)
+	}
+}
+
+func TestPrometheusHandler(t *testing.T) {
+	Inc("prom-test", "rows_written_total", 3)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	prometheusHandler(rr, req)
+
+	body := rr.Body.String()
+	if !strings.Contains(body, "go_etl_prom_test_rows_written_total 3") {
+		t.Fatalf("unexpected prometheus body: %s", body)
 	}
 }

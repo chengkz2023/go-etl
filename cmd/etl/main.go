@@ -40,8 +40,12 @@ func main() {
 		Shutdown(context.Context) error
 	}
 	if cfg.Metrics.Enabled {
-		metricsServer = metrics.StartServer(cfg.Metrics.Addr)
-		logger.Info("metrics server started", zap.String("addr", cfg.Metrics.Addr), zap.String("path", "/debug/vars"))
+		metricsServer = metrics.StartServer(cfg.Metrics.Addr, cfg.Metrics.PrometheusEnabled)
+		logger.Info("metrics server started",
+			zap.String("addr", cfg.Metrics.Addr),
+			zap.String("expvar_path", "/debug/vars"),
+			zap.Bool("prometheus_enabled", cfg.Metrics.PrometheusEnabled),
+		)
 	}
 
 	// Open file status store
@@ -59,6 +63,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("failed to load IP database", zap.Error(err))
 		}
+		ipdb = ipdb.WithCache(cfg.IPDB.CacheSize)
 		logger.Info("IP database loaded", zap.Int("ranges", ipdb.Count()))
 	}
 

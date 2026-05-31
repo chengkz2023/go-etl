@@ -24,9 +24,10 @@ type Watcher struct {
 	ready     ReadyConfig
 	logger    *zap.Logger
 
-	stopCh chan struct{}
-	fileCh chan string
-	once   sync.Once
+	stopCh   chan struct{}
+	fileCh   chan string
+	once     sync.Once
+	stopOnce sync.Once
 }
 
 // New creates a dual-channel Watcher for a pipeline's directory.
@@ -151,6 +152,8 @@ func (w *Watcher) merge(pollerCh <-chan string) {
 
 // Stop shuts down the watcher.
 func (w *Watcher) Stop() {
-	close(w.stopCh)
-	w.fsWatcher.Close()
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		_ = w.fsWatcher.Close()
+	})
 }

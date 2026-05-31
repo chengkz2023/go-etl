@@ -94,16 +94,22 @@ clickhouse:
   debug: false
   batch_size: 10000
   flush_interval: 5s
+  write_timeout: 60s
+  async_insert:
+    enabled: false
+    wait: true
 
 metrics:
   enabled: true
   addr: ":9090"
+  prometheus_enabled: false
 
 ip_db:
   type: csv
   path: ./data/ipdb.csv
   columns: [country, province, city, isp]
   reload_interval: 3600s
+  cache_size: 0
 
 pipeline_dir: pipelines
 ```
@@ -113,6 +119,8 @@ pipeline_dir: pipelines
 - `pipeline_dir` 相对主配置文件所在目录解析。
 - 当前 `ip_db.path`、`dict_file`、`watch_dir` 按进程工作目录解析。
 - `clickhouse.batch_size` 是全局默认值，pipeline 可用 `batch_size` 覆盖。
+- `clickhouse.write_timeout` 控制单次 ClickHouse 批写超时，压测或慢盘环境可适当调大。
+- `clickhouse.async_insert` 默认关闭；只有客户端无法形成足够大批次时才建议开启。
 
 ## 5. Pipeline 配置
 
@@ -375,6 +383,8 @@ ingest_time DateTime DEFAULT now()
 
 可以由 ClickHouse 自动填充，不要求 ETL 传入。
 
+writer 按 reader 输出的每个批次同步提交到 ClickHouse，不再维护跨 worker 共享缓冲。这样某个文件写入失败时，失败范围只覆盖当前文件的当前批次，不会混入其他文件的行。
+
 ### 10.2 类型转换
 
 `fields` 配置决定 ClickHouse 输出列和类型转换：
@@ -404,6 +414,8 @@ fields:
 - `IPv4/IPv6`
 - `Nullable(...)`
 
+字段类型转换器会在启动时预编译字段 source、基础类型和时间 layout，避免在每一行重复解析 ClickHouse 类型字符串。
+
 字段配置补充：
 
 | 字段 | 说明 |
@@ -415,7 +427,22 @@ fields:
 | `default` | 输入为空时使用的默认字符串 |
 | `nullable` | 输入为空且 nullable=true 时写入 nil |
 
-### 10.3 ClickHouse 设计依据
+### 10.3 可选去重元字段
+
+当 pipeline 开启 `dedup.enabled: true` 时，reader 会为每行生成稳定元字段：
+
+```yaml
+dedup:
+  enabled: true
+  record_id_field: _etl_record_id
+  source_file_field: _etl_source_file
+  line_number_field: _etl_line_number
+  row_hash_field: _etl_row_hash
+```
+
+这些字段仍然需要在 pipeline `fields` 中声明为 `generated: true` 才会写入 ClickHouse。默认不开启，因此现有表结构和配置不受影响。
+
+### 10.4 ClickHouse 设计依据
 
 本项目样例表设计参考以下 ClickHouse 规则：
 
@@ -423,6 +450,8 @@ fields:
 - Per `schema-types-lowcardinality`：方法、地域、运营商、DNS 类型等低基数字符串适合 `LowCardinality(String)`。
 - Per `schema-pk-prioritize-filters`：`ORDER BY` 应优先选择常用过滤列，样例中按时间、IP、域名或状态码排序。
 - Per `insert-batch-size`：ClickHouse 推荐批量写入，理想批大小通常在 10K 到 100K 行；测试样例为了快速观察设置得较小，生产应调大。
+- Per `insert-format-native`：项目继续使用 clickhouse-go Native 协议批量写入。
+- Per `insert-async-small-batches`：async insert 仅作为小批次场景的可选配置，默认关闭。
 
 ## 11. 成功归档、失败重试与死信
 
@@ -560,7 +589,99 @@ SELECT count() FROM cdr.http_cdr;
 
 预期都是 `3`。
 
-## 14. 构建与部署
+## 14. 压测样例与基准结果
+
+目录：[examples/stress-test](../examples/stress-test)
+
+该目录是一套可独立上传到 Linux 服务器执行的端到端压测用例，覆盖文件发现、首行公共字段、分隔符解析、IP 匹配、字典映射、ClickHouse 批量写入和状态库持久化。
+
+包含：
+
+- `schema.sql`：重建压测表 `cdr.stress_dns_cdr` 和 `cdr.stress_http_cdr`。
+- `config.yaml`：压测主配置。
+- `pipelines/dns_cdr.yaml`：DNS 压测管道，使用 marker 文件就绪模式。
+- `pipelines/http_cdr.yaml`：HTTP 压测管道，使用 atomic rename 文件就绪模式。
+- `generator/main.go`：可调规模的数据生成器源码。
+- `bin/go-etl-linux-amd64`：已编译的 Linux amd64 ETL 二进制。
+- `bin/stress-generator-linux-amd64`：已编译的 Linux amd64 数据生成器。
+- `run_stress.sh`：一键压测脚本。
+- `ipdb/ipdb.csv` 和 `dict/http_method.csv`：压测依赖数据。
+
+一键运行：
+
+```bash
+cd stress-test
+bash run_stress.sh
+```
+
+默认生成 20 个 DNS 文件和 20 个 HTTP 文件，每个文件 50,000 行，总计 2,000,000 行。
+
+调整规模示例：
+
+```bash
+DNS_FILES=100 HTTP_FILES=100 ROWS_PER_FILE=100000 TIMEOUT_SECONDS=3600 bash run_stress.sh
+```
+
+脚本会自动：
+
+- 重建 ClickHouse 压测表。
+- 清理并生成输入文件。
+- 启动 ETL。
+- 轮询 ClickHouse 行数。
+- 输出耗时和近似吞吐。
+- 压测完成后停止 ETL。
+
+脚本默认每 5 秒查询一次 ClickHouse 行数，可通过 `POLL_SECONDS` 调整：
+
+```bash
+POLL_SECONDS=1 bash run_stress.sh
+```
+
+本地虚拟机稳定压测基准：
+
+```text
+操作系统: CentOS 7.9
+CPU: 4 核
+内存: 8 GiB
+磁盘: 40 GiB
+ClickHouse: 本机实例，127.0.0.1:9000
+数据规模: 20,000,000 行
+DNS 行数: 10,000,000
+HTTP 行数: 10,000,000
+耗时: 91s
+吞吐: 约 210,000-220,000 行/秒
+死信文件数: 0
+失败行/文件日志: 0
+```
+
+稳定配置：
+
+```yaml
+clickhouse:
+  max_open_conns: 16
+  max_idle_conns: 8
+  batch_size: 50000
+  flush_interval: 1s
+  write_timeout: 60s
+```
+
+两个压测管道均使用：
+
+```yaml
+workers: 2
+batch_size: 50000
+```
+
+调优结论：
+
+- 4 核 8 GiB 虚拟机上，`workers: 2` 稳定达到约 21 万到 22 万行/秒。
+- `batch_size: 50000` 和 `batch_size: 100000` 吞吐接近，推荐使用 `50000`，降低内存压力和失败重试成本。
+- `workers: 10` 会压垮当前虚拟机和 ClickHouse 写入链路，出现 `send batch: context deadline exceeded`。
+- `write_timeout` 建议结合实际慢查询、磁盘和 ClickHouse merge 压力调优；压测基准使用 `60s`。
+- 磁盘空间不足会导致 ClickHouse 报 `Cannot reserve 1.00 MiB, not enough space`，压测前应确认 ClickHouse 数据盘有足够可用空间。
+- 判断压测结果是否有效时，应同时确认 `dead` 目录为空，并检查日志中没有 `process file failed`、`dead-letter`、`transform row failed`。
+
+## 15. 构建与部署
 
 Windows 下交叉编译脚本：[scripts/build.ps1](../scripts/build.ps1)
 
@@ -603,7 +724,7 @@ dist/
 ./go-etl-linux-amd64 -config config.yaml -store data/file_status.db -log info
 ```
 
-## 15. 测试
+## 16. 测试
 
 运行全部测试：
 
@@ -615,16 +736,18 @@ go test ./...
 
 - 配置加载和默认值。
 - 完整测试 fixture 配置加载。
+- 压测 fixture 配置加载。
 - ready strategy。
 - reader 批读取。
 - bbolt 状态流转。
 - 重试和死信状态。
+- 运行时 failed 文件重试投递。
 - 归档和 marker 清理。
 - 类型转换。
 - ClickHouse 显式列 INSERT SQL。
 - metrics 计数器。
 
-## 16. 当前限制
+## 17. 当前限制
 
 需要开发人员注意的限制：
 
@@ -632,25 +755,21 @@ go test ./...
 - 多字符分隔符目前不处理引号内分隔符，只做 `strings.Split`。
 - `ip_db.reload_interval` 已在配置中存在，但当前没有实现热加载。
 - header meta 使用 `header_fields` 按位置映射首行公共字段，不再解析 `key=value` 或生成 `meta_N` 字段。
-- writer 没有实现 ClickHouse async insert 配置。
-- 失败重试恢复发生在服务启动时；当前没有后台定时把到期 failed 自动重新入队。
-- 指标是 expvar 计数器，不是 Prometheus 原生格式。
+- Prometheus `/metrics` 当前输出 expvar 计数器的文本格式，尚未提供 histogram/summary 类型。
 - 状态库记录路径字符串；如果 watch_dir 路径写法变化，同一文件可能被视为不同 key。
 
-## 17. 后续演进建议
+## 18. 后续演进建议
 
 优先级建议：
 
 1. 实现 IP 库热加载，真正使用 `reload_interval`。
-2. 增加 failed 到期文件的后台定时恢复，而不仅是启动恢复。
-3. 增加配置项控制 ClickHouse async insert。
-4. 增加管理接口，查询 pending/processing/failed/dead 文件列表。
-5. 增加 Prometheus `/metrics` 输出。
-6. 增加更严格的 CSV/多字符分隔符解析器，支持引号和转义。
-7. 增加按日期或 pipeline 分层归档策略。
-8. 增加表结构生成工具，由 pipeline `fields` 生成 ClickHouse DDL。
+2. 增加管理接口，查询 pending/processing/failed/dead 文件列表。
+3. 增加 Prometheus histogram/summary 指标。
+4. 增加更严格的 CSV/多字符分隔符解析器，支持引号和转义。
+5. 增加按日期或 pipeline 分层归档策略。
+6. 增加表结构生成工具，由 pipeline `fields` 生成 ClickHouse DDL。
 
-## 18. 开发约定
+## 19. 开发约定
 
 - 新增文档和代码注释默认使用中文。
 - pipeline 字段配置已收敛为 `header_fields` 和 `fields`；派生字段通过 `generated: true` 排除在输入列之外。

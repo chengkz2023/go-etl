@@ -9,19 +9,25 @@ clickhouse:
   debug: false
   batch_size: 2
   flush_interval: 2s
+  write_timeout: 60s
+  async_insert:
+    enabled: false
+    wait: true
 
 metrics:
   enabled: true
   addr: ":9090"
+  prometheus_enabled: true
 
 ip_db:
   type: csv
-  path: ./examples/full-test/ipdb/ipdb.csv
+  path: ./ipdb/ipdb.csv
   columns:
     - country
     - province
     - city
     - isp
   reload_interval: 3600s
+  cache_size: 0
 
 pipeline_dir: ./pipelines

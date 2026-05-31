@@ -65,8 +65,8 @@ transformers:
     field: method
     dict_file: ./dict/http_method.csv
 clickhouse_table: cdr.stress_http_cdr
-workers: 1
-batch_size: 10000
+workers: 2
+batch_size: 50000
 retry_failed: true
 max_retries: 2
 retry_interval: 5s

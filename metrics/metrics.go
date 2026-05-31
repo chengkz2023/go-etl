@@ -4,6 +4,7 @@ import (
 	"expvar"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -24,15 +25,42 @@ func ObserveDuration(pipeline, name string, d time.Duration) {
 }
 
 // StartServer starts the built-in expvar endpoint.
-func StartServer(addr string) *http.Server {
+func StartServer(addr string, prometheusEnabled ...bool) *http.Server {
 	if addr == "" {
 		addr = ":9090"
 	}
-	srv := &http.Server{Addr: addr}
+	mux := http.NewServeMux()
+	mux.Handle("/debug/vars", expvar.Handler())
+	if len(prometheusEnabled) > 0 && prometheusEnabled[0] {
+		mux.HandleFunc("/metrics", prometheusHandler)
+	}
+	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		_ = srv.ListenAndServe()
 	}()
 	return srv
+}
+
+func prometheusHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	for _, key := range snapshotKeys() {
+		v := expvar.Get(key)
+		if v == nil {
+			continue
+		}
+		fmt.Fprintf(w, "# TYPE %s counter\n%s %s\n", key, key, v.String())
+	}
+}
+
+func snapshotKeys() []string {
+	mu.Lock()
+	defer mu.Unlock()
+	keys := make([]string, 0, len(counters))
+	for key := range counters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func counter(pipeline, name string) *expvar.Int {

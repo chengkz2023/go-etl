@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"go-etl/config"
 	"go-etl/model"
+	"go-etl/reader"
 	"go-etl/store"
 )
 
@@ -35,6 +37,38 @@ func TestMoveToDeadLetter(t *testing.T) {
 	}
 	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
 		t.Fatalf("source still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestMoveMarkerWithArchivedData(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "a.csv")
+	markerPath := sourcePath + ".ok"
+	archiveDir := filepath.Join(dir, "archive")
+
+	if err := os.WriteFile(sourcePath, []byte("row\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{cfg: config.PipelineConfig{
+		ReadyStrategy: "marker",
+		MarkerSuffix:  ".ok",
+		ArchiveDir:    archiveDir,
+	}}
+	targetPath, err := moveFileToDir(sourcePath, archiveDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.moveMarkerWithData(sourcePath, targetPath, zaptest.NewLogger(t))
+
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("source marker still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(targetPath + ".ok"); err != nil {
+		t.Fatalf("target marker missing: %v", err)
 	}
 }
 
@@ -142,6 +176,32 @@ func TestInputFieldNamesSkipsGeneratedFields(t *testing.T) {
 	}
 }
 
+func TestApplyDedupMeta(t *testing.T) {
+	p := &Pipeline{cfg: config.PipelineConfig{
+		Dedup: config.DedupConfig{
+			Enabled:         true,
+			RecordIDField:   "_etl_record_id",
+			SourceFileField: "_etl_source_file",
+			LineNumberField: "_etl_line_number",
+			RowHashField:    "_etl_row_hash",
+		},
+	}}
+
+	batch := reader.Batch{
+		Rows: []model.Row{{"a": "b"}},
+		Meta: []reader.RowMeta{{LineNumber: 7, RawHash: "abc"}},
+	}
+	p.applyDedupMeta(filepath.Join("watch", "dns", "a.cdr"), batch)
+
+	row := batch.Rows[0]
+	if row["_etl_source_file"] != "a.cdr" || row["_etl_line_number"] != "7" || row["_etl_row_hash"] != "abc" {
+		t.Fatalf("dedup meta not applied: %#v", row)
+	}
+	if row["_etl_record_id"] == "" {
+		t.Fatalf("record id missing: %#v", row)
+	}
+}
+
 func TestRetryDispatcherDispatchesRetryableFailedFiles(t *testing.T) {
 	s, err := store.NewFileStore(filepath.Join(t.TempDir(), "status.db"))
 	if err != nil {
@@ -174,8 +234,9 @@ func TestRetryDispatcherDispatchesRetryableFailedFiles(t *testing.T) {
 	defer p.cancel()
 
 	workCh := make(chan string, 1)
-	p.wg.Add(1)
-	go p.retryDispatcher(workCh)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go p.retryDispatcher(workCh, &wg)
 
 	select {
 	case got := <-workCh:
@@ -185,4 +246,6 @@ func TestRetryDispatcherDispatchesRetryableFailedFiles(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for retry file")
 	}
+	p.cancel()
+	wg.Wait()
 }

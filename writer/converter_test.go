@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -101,5 +102,61 @@ func TestClickHouseWriterInsertSQLUsesExplicitColumns(t *testing.T) {
 	want := "INSERT INTO cdr.http_cdr (event_time, client_ip, status_code)"
 	if got != want {
 		t.Fatalf("insert sql = %q, want %q", got, want)
+	}
+}
+
+func TestClickHouseWriterStoresWriteTimeout(t *testing.T) {
+	w := &ClickHouseWriter{writeTimeout: time.Minute}
+	if w.writeTimeout != time.Minute {
+		t.Fatalf("writeTimeout = %s", w.writeTimeout)
+	}
+}
+
+func TestClickHouseWriterWriteBatchDoesNotBufferAcrossCalls(t *testing.T) {
+	var calls [][]model.Row
+	w := &ClickHouseWriter{
+		insertFunc: func(rows []model.Row) error {
+			copied := append([]model.Row(nil), rows...)
+			calls = append(calls, copied)
+			return nil
+		},
+	}
+
+	if err := w.WriteBatch([]model.Row{{"file": "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBatch([]model.Row{{"file": "b"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("insert calls = %d, want 2", len(calls))
+	}
+	if calls[0][0]["file"] != "a" || calls[1][0]["file"] != "b" {
+		t.Fatalf("unexpected calls: %#v", calls)
+	}
+}
+
+func TestClickHouseWriterWriteBatchFailureDoesNotKeepRows(t *testing.T) {
+	boom := errors.New("boom")
+	calls := 0
+	w := &ClickHouseWriter{
+		insertFunc: func(rows []model.Row) error {
+			calls++
+			if calls == 1 {
+				return boom
+			}
+			if rows[0]["file"] != "b" {
+				t.Fatalf("second call rows = %#v", rows)
+			}
+			return nil
+		},
+	}
+
+	if err := w.WriteBatch([]model.Row{{"file": "a"}}); !errors.Is(err, boom) {
+		t.Fatalf("first error = %v, want boom", err)
+	}
+	if err := w.WriteBatch([]model.Row{{"file": "b"}}); err != nil {
+		t.Fatal(err)
 	}
 }

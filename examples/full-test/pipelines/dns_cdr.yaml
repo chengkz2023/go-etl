@@ -1,11 +1,11 @@
 name: dns_cdr
-watch_dir: ./examples/full-test/watch/dns
+watch_dir: ./watch/dns
 file_pattern: "*.cdr"
 ready_strategy: marker
 marker_suffix: ".ok"
 cleanup_marker: true
-archive_dir: ./examples/full-test/archive/dns
-dead_letter_dir: ./examples/full-test/dead/dns
+archive_dir: ./archive/dns
+dead_letter_dir: ./dead/dns
 delimiter: "|"
 has_header_meta: true
 header_fields:

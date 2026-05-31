@@ -9,6 +9,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent $ScriptDir
+$OriginalLocation = Get-Location
+
 $supportedTargets = @{
     "windows-amd64" = @{ GOOS = "windows"; GOARCH = "amd64"; Ext = ".exe" }
     "windows-arm64" = @{ GOOS = "windows"; GOARCH = "arm64"; Ext = ".exe" }
@@ -22,36 +26,52 @@ if ($All) {
     $Target = @($supportedTargets.Keys | Sort-Object)
 }
 
-if ($Clean -and (Test-Path -LiteralPath $OutputDir)) {
-    Remove-Item -LiteralPath $OutputDir -Recurse -Force
+$resolvedOutputDir = $OutputDir
+if (-not [System.IO.Path]::IsPathRooted($resolvedOutputDir)) {
+    $resolvedOutputDir = Join-Path $RepoRoot $resolvedOutputDir
 }
 
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$resolvedPackage = $Package
+if (-not [System.IO.Path]::IsPathRooted($resolvedPackage)) {
+    $resolvedPackage = Join-Path $RepoRoot $resolvedPackage
+}
 
-foreach ($targetName in $Target) {
-    if (-not $supportedTargets.ContainsKey($targetName)) {
-        $valid = ($supportedTargets.Keys | Sort-Object) -join ", "
-        throw "Unsupported target '$targetName'. Valid targets: $valid"
+try {
+    Set-Location $RepoRoot
+
+    if ($Clean -and (Test-Path -LiteralPath $resolvedOutputDir)) {
+        Remove-Item -LiteralPath $resolvedOutputDir -Recurse -Force
     }
 
-    $targetSpec = $supportedTargets[$targetName]
-    $goos = $targetSpec["GOOS"]
-    $goarch = $targetSpec["GOARCH"]
-    $ext = $targetSpec["Ext"]
-    $fileName = "{0}-{1}{2}" -f $Name, $targetName, $ext
-    $outFile = Join-Path $OutputDir $fileName
+    New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
-    Write-Host "Building $targetName -> $outFile"
+    foreach ($targetName in $Target) {
+        if (-not $supportedTargets.ContainsKey($targetName)) {
+            $valid = ($supportedTargets.Keys | Sort-Object) -join ", "
+            throw "Unsupported target '$targetName'. Valid targets: $valid"
+        }
 
-    $env:GOOS = $goos
-    $env:GOARCH = $goarch
-    $env:CGO_ENABLED = "0"
+        $targetSpec = $supportedTargets[$targetName]
+        $goos = $targetSpec["GOOS"]
+        $goarch = $targetSpec["GOARCH"]
+        $ext = $targetSpec["Ext"]
+        $fileName = "{0}-{1}{2}" -f $Name, $targetName, $ext
+        $outFile = Join-Path $resolvedOutputDir $fileName
 
-    go build -trimpath -ldflags "-s -w" -o $outFile $Package
+        Write-Host "Building $targetName -> $outFile"
+
+        $env:GOOS = $goos
+        $env:GOARCH = $goarch
+        $env:CGO_ENABLED = "0"
+
+        go build -trimpath -ldflags "-s -w" -o $outFile $resolvedPackage
+    }
+}
+finally {
+    Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
+    Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
+    Remove-Item Env:\CGO_ENABLED -ErrorAction SilentlyContinue
+    Set-Location $OriginalLocation
 }
 
-Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
-Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
-Remove-Item Env:\CGO_ENABLED -ErrorAction SilentlyContinue
-
-Write-Host "Build complete. Output: $OutputDir"
+Write-Host "Build complete. Output: $resolvedOutputDir"

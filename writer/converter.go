@@ -11,17 +11,29 @@ import (
 )
 
 type rowConverter struct {
-	fields []model.FieldDef
+	fields []compiledField
 }
 
 func newRowConverter(fields []model.FieldDef) *rowConverter {
-	return &rowConverter{fields: fields}
+	compiled := make([]compiledField, len(fields))
+	for i, field := range fields {
+		source := field.Source
+		if source == "" {
+			source = field.Name
+		}
+		compiled[i] = compiledField{
+			def:      field,
+			source:   source,
+			baseType: normalizeType(field.Type),
+		}
+	}
+	return &rowConverter{fields: compiled}
 }
 
 func (c *rowConverter) fieldNames() []string {
 	names := make([]string, len(c.fields))
 	for i, f := range c.fields {
-		names[i] = f.Name
+		names[i] = f.def.Name
 	}
 	return names
 }
@@ -29,35 +41,42 @@ func (c *rowConverter) fieldNames() []string {
 func (c *rowConverter) values(row model.Row) ([]interface{}, error) {
 	values := make([]interface{}, len(c.fields))
 	for i, field := range c.fields {
-		value, err := convertField(row, field)
+		value, err := field.convert(row)
 		if err != nil {
-			return nil, fmt.Errorf("field %q: %w", field.Name, err)
+			return nil, fmt.Errorf("field %q: %w", field.def.Name, err)
 		}
 		values[i] = value
 	}
 	return values, nil
 }
 
-func convertField(row model.Row, field model.FieldDef) (interface{}, error) {
-	source := field.Source
-	if source == "" {
-		source = field.Name
-	}
+type compiledField struct {
+	def      model.FieldDef
+	source   string
+	baseType string
+}
 
-	raw := strings.TrimSpace(row[source])
+func (f compiledField) convert(row model.Row) (interface{}, error) {
+	raw := strings.TrimSpace(row[f.source])
 	if raw == "" {
-		raw = field.Default
+		raw = f.def.Default
 	}
-	if raw == "" && field.Nullable {
+	if raw == "" && f.def.Nullable {
 		return nil, nil
 	}
 
-	return convertValue(raw, field.Type, field.Layout)
+	return convertValueByBaseType(raw, f.baseType, f.def.Layout)
+}
+
+func convertField(row model.Row, field model.FieldDef) (interface{}, error) {
+	return newRowConverter([]model.FieldDef{field}).fields[0].convert(row)
 }
 
 func convertValue(raw, typ, layout string) (interface{}, error) {
-	baseType := normalizeType(typ)
+	return convertValueByBaseType(raw, normalizeType(typ), layout)
+}
 
+func convertValueByBaseType(raw, baseType, layout string) (interface{}, error) {
 	switch baseType {
 	case "", "string", "fixedstring", "enum8", "enum16", "uuid":
 		return raw, nil

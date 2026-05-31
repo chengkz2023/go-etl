@@ -10,11 +10,11 @@ import (
 )
 
 var (
-	root        = flag.String("root", "examples/stress-test", "stress-test directory")
-	dnsFiles    = flag.Int("dns-files", 20, "number of DNS files to generate")
-	httpFiles   = flag.Int("http-files", 20, "number of HTTP files to generate")
-	rowsPerFile = flag.Int("rows", 50000, "data rows per file")
-	clean       = flag.Bool("clean", true, "clean watch/archive/dead directories and file_status.db before generating")
+	root        = flag.String("root", "examples/stress-test", "stress-test 目录")
+	dnsFiles    = flag.Int("dns-files", 20, "生成的 DNS 文件数")
+	httpFiles   = flag.Int("http-files", 20, "生成的 HTTP 文件数")
+	rowsPerFile = flag.Int("rows", 50000, "每个文件的数据行数")
+	clean       = flag.Bool("clean", true, "生成前清理 watch/archive/dead 目录和 file_status.db")
 )
 
 var (
@@ -41,7 +41,7 @@ func main() {
 	flag.Parse()
 
 	if *rowsPerFile <= 0 || *dnsFiles < 0 || *httpFiles < 0 {
-		fail("dns-files, http-files must be >= 0 and rows must be > 0")
+		fail("dns-files、http-files 必须 >= 0，rows 必须 > 0")
 	}
 
 	if *clean {
@@ -59,7 +59,7 @@ func main() {
 	totalHTTP := generateHTTP()
 	elapsed := time.Since(start)
 
-	fmt.Printf("generated dns_rows=%d http_rows=%d total_rows=%d files=%d elapsed=%s\n",
+	fmt.Printf("生成完成 dns_rows=%d http_rows=%d total_rows=%d files=%d elapsed=%s\n",
 		totalDNS,
 		totalHTTP,
 		totalDNS+totalHTTP,
@@ -146,7 +146,7 @@ func generateHTTP() int64 {
 
 func writeLine(w *bufio.Writer, format string, args ...interface{}) {
 	if _, err := fmt.Fprintf(w, format, args...); err != nil {
-		fail("write file: %v", err)
+		fail("写文件失败: %v", err)
 	}
 }
 

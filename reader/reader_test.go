@@ -35,6 +35,30 @@ func TestReadBatchesSkipsLinesAndMergesHeaderMeta(t *testing.T) {
 	}
 }
 
+func TestReadBatchesWithMetaLineNumberSkipsHeader(t *testing.T) {
+	r := NewReader("|", []string{"ts", "ip"}, false, nil)
+	r.SetSkipLines(1)
+
+	var got Batch
+	err := r.ReadBatchesWithMeta(strings.NewReader("probe|south\n1|10.0.0.1\n2|10.0.0.2\n"), 10, func(batch Batch) error {
+		got = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(got.Rows))
+	}
+	if got.Meta[0].LineNumber != 2 || got.Meta[1].LineNumber != 3 {
+		t.Fatalf("line numbers = %#v", got.Meta)
+	}
+	if got.Meta[0].RawHash == "" || got.Meta[0].RawHash == got.Meta[1].RawHash {
+		t.Fatalf("unexpected hashes: %#v", got.Meta)
+	}
+}
+
 func TestParseHeaderMetaUsesConfiguredFieldNames(t *testing.T) {
 	meta := ParseHeaderMeta("probe-1|south", "|", []string{"probe_id", "region", "vendor"})
 

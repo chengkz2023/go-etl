@@ -12,6 +12,10 @@ clickhouse:
   debug: false
   batch_size: 10000
   flush_interval: 5s
+  write_timeout: 60s
+  async_insert:
+    enabled: false
+    wait: true
 
 # IP地址库
 ip_db:
@@ -23,6 +27,7 @@ ip_db:
     - city
     - isp
   reload_interval: 3600s
+  cache_size: 0
 
 # 管道配置目录（每个话单类型一个文件）
 pipeline_dir: pipelines

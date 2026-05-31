@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // IPRange represents an IP address range with associated attributes.
@@ -19,7 +20,11 @@ type IPRange struct {
 
 // IPDB is a loaded IP database ready for queries.
 type IPDB struct {
-	ranges []IPRange // sorted by Start, non-overlapping
+	ranges    []IPRange // sorted by Start, non-overlapping
+	cacheSize int
+	cacheMu   sync.RWMutex
+	cache     map[string]map[string]string
+	cacheKeys []string
 }
 
 // LoadCSV loads IP ranges from a CSV file.
@@ -81,10 +86,29 @@ func LoadCSV(path string, columns []string) (*IPDB, error) {
 	return &IPDB{ranges: ranges}, nil
 }
 
+// WithCache enables a small FIFO lookup cache. A size <= 0 disables caching.
+func (db *IPDB) WithCache(size int) *IPDB {
+	if db == nil || size <= 0 {
+		return db
+	}
+	db.cacheSize = size
+	db.cache = make(map[string]map[string]string, size)
+	db.cacheKeys = make([]string, 0, size)
+	return db
+}
+
 // Lookup finds the IP range that contains the given IP.
 // Returns the attributes of the matching range, or nil if not found.
 func (db *IPDB) Lookup(ipStr string) map[string]string {
-	ip, err := ipToUint32(strings.TrimSpace(ipStr))
+	key := strings.TrimSpace(ipStr)
+	if key == "" {
+		return nil
+	}
+	if cached, ok := db.cacheGet(key); ok {
+		return cached
+	}
+
+	ip, err := ipToUint32(key)
 	if err != nil {
 		return nil
 	}
@@ -93,7 +117,37 @@ func (db *IPDB) Lookup(ipStr string) map[string]string {
 	if !ok {
 		return nil
 	}
+	db.cacheSet(key, r.Attrs)
 	return r.Attrs
+}
+
+func (db *IPDB) cacheGet(key string) (map[string]string, bool) {
+	if db.cacheSize <= 0 {
+		return nil, false
+	}
+	db.cacheMu.RLock()
+	defer db.cacheMu.RUnlock()
+	v, ok := db.cache[key]
+	return v, ok
+}
+
+func (db *IPDB) cacheSet(key string, attrs map[string]string) {
+	if db.cacheSize <= 0 || attrs == nil {
+		return
+	}
+	db.cacheMu.Lock()
+	defer db.cacheMu.Unlock()
+	if _, ok := db.cache[key]; ok {
+		return
+	}
+	if len(db.cacheKeys) >= db.cacheSize {
+		oldest := db.cacheKeys[0]
+		delete(db.cache, oldest)
+		copy(db.cacheKeys, db.cacheKeys[1:])
+		db.cacheKeys = db.cacheKeys[:len(db.cacheKeys)-1]
+	}
+	db.cache[key] = attrs
+	db.cacheKeys = append(db.cacheKeys, key)
 }
 
 // findRange performs binary search for the range containing ip.

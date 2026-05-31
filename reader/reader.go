@@ -2,6 +2,8 @@ package reader
 
 import (
 	"bufio"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -20,6 +22,18 @@ type Reader struct {
 	// fast path: single-char delimiter
 	singleChar byte
 	isSingle   bool
+}
+
+// RowMeta contains stable metadata for one parsed data row.
+type RowMeta struct {
+	LineNumber int
+	RawHash    string
+}
+
+// Batch contains parsed rows and optional row metadata.
+type Batch struct {
+	Rows []model.Row
+	Meta []RowMeta
 }
 
 // NewReader creates a new Reader.
@@ -61,6 +75,13 @@ func (r *Reader) ReadAll(rd io.Reader) ([]model.Row, error) {
 
 // ReadBatches reads rows from an io.Reader and calls onBatch for each batch.
 func (r *Reader) ReadBatches(rd io.Reader, batchSize int, onBatch func([]model.Row) error) error {
+	return r.ReadBatchesWithMeta(rd, batchSize, func(batch Batch) error {
+		return onBatch(batch.Rows)
+	})
+}
+
+// ReadBatchesWithMeta reads rows and row metadata from an io.Reader.
+func (r *Reader) ReadBatchesWithMeta(rd io.Reader, batchSize int, onBatch func(Batch) error) error {
 	if batchSize <= 0 {
 		batchSize = 10000
 	}
@@ -70,10 +91,12 @@ func (r *Reader) ReadBatches(rd io.Reader, batchSize int, onBatch func([]model.R
 	scanner.Buffer(make([]byte, 0, 256*1024), 16*1024*1024)
 
 	batch := make([]model.Row, 0, batchSize)
+	metaBatch := make([]RowMeta, 0, batchSize)
 	lineNum := 0
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
 		}
@@ -100,11 +123,16 @@ func (r *Reader) ReadBatches(rd io.Reader, batchSize int, onBatch func([]model.R
 		}
 
 		batch = append(batch, row)
+		metaBatch = append(metaBatch, RowMeta{
+			LineNumber: lineNum,
+			RawHash:    hashLine(rawLine),
+		})
 		if len(batch) >= batchSize {
-			if err := onBatch(batch); err != nil {
+			if err := onBatch(Batch{Rows: batch, Meta: metaBatch}); err != nil {
 				return err
 			}
 			batch = make([]model.Row, 0, batchSize)
+			metaBatch = make([]RowMeta, 0, batchSize)
 		}
 	}
 
@@ -113,12 +141,17 @@ func (r *Reader) ReadBatches(rd io.Reader, batchSize int, onBatch func([]model.R
 	}
 
 	if len(batch) > 0 {
-		if err := onBatch(batch); err != nil {
+		if err := onBatch(Batch{Rows: batch, Meta: metaBatch}); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func hashLine(line string) string {
+	sum := sha1.Sum([]byte(line))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *Reader) parseLine(line string) (model.Row, error) {

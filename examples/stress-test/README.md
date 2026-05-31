@@ -1,81 +1,91 @@
-# ETL Stress Test
+# ETL 压测样例
 
-This example creates repeatable DNS and HTTP CDR input files for end-to-end ETL pressure testing.
+这个目录提供一套可重复生成 DNS 和 HTTP 话单文件的端到端压测样例。
 
-It exercises:
+覆盖的能力包括：
 
-- file discovery with marker and atomic rename modes
-- first-line header fields
-- delimited parsing with `|` and `|++|`
-- IP matching
-- dictionary mapping
-- ClickHouse batch writes
-- file status persistence
-- expvar metrics
+- marker 和 atomic rename 两种文件就绪模式
+- 文件首行公共字段
+- `|` 和 `|++|` 分隔符解析
+- IP 归属地匹配
+- 字典映射
+- ClickHouse 批量写入
+- 文件处理状态持久化
+- expvar 指标
+- 可配置写入超时
+- 可选 IP 查询缓存
 
-## 1. Prepare ClickHouse
+## 1. 准备 ClickHouse
 
-Run from the repository root:
+如果在仓库根目录执行：
 
 ```bash
 clickhouse-client --multiquery < examples/stress-test/schema.sql
 ```
 
-The script recreates:
+如果只上传了 `stress-test` 目录到服务器，则在 `stress-test` 目录内执行：
+
+```bash
+clickhouse-client --multiquery < schema.sql
+```
+
+脚本会重建两张压测表：
 
 ```text
 cdr.stress_dns_cdr
 cdr.stress_http_cdr
 ```
 
-## 2. Generate Input Files
+## 2. 生成输入文件
 
-Default generation creates 20 DNS files and 20 HTTP files, each with 50,000 data rows.
+默认生成 20 个 DNS 文件和 20 个 HTTP 文件，每个文件 50,000 行数据。
+
+在仓库根目录执行：
 
 ```bash
 go run ./examples/stress-test/generator
 ```
 
-That produces 2,000,000 total rows:
+默认总行数为 2,000,000：
 
 ```text
-DNS:  20 * 50,000 = 1,000,000 rows
-HTTP: 20 * 50,000 = 1,000,000 rows
+DNS:  20 * 50,000 = 1,000,000 行
+HTTP: 20 * 50,000 = 1,000,000 行
 ```
 
-You can change the scale:
+可以调整规模：
 
 ```bash
 go run ./examples/stress-test/generator -dns-files 100 -http-files 100 -rows 100000
 ```
 
-Useful options:
+常用参数：
 
 ```text
--dns-files    number of DNS files
--http-files   number of HTTP files
--rows         data rows per file
--clean        clean watch/archive/dead directories and file_status.db before generating
--root         stress-test directory
+-dns-files    生成的 DNS 文件数
+-http-files   生成的 HTTP 文件数
+-rows         每个文件的数据行数
+-clean        生成前清理 watch/archive/dead 目录和 file_status.db
+-root         stress-test 目录
 ```
 
-## 3. Start ETL
+## 3. 启动 ETL
 
-Use the current build:
+使用当前源码构建后运行：
 
 ```bash
 go build -o dist/go-etl-stress ./cmd/etl
 ./dist/go-etl-stress -config examples/stress-test/config.yaml -store examples/stress-test/file_status.db -log info
 ```
 
-On Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 go build -o dist\go-etl-stress.exe .\cmd\etl
 .\dist\go-etl-stress.exe -config examples\stress-test\config.yaml -store examples\stress-test\file_status.db -log info
 ```
 
-For a Linux one-command run, build `dist/go-etl-linux-amd64` and execute:
+Linux 一键压测方式：
 
 ```bash
 cd examples/stress-test
@@ -83,17 +93,30 @@ chmod +x run_stress.sh bin/go-etl-linux-amd64 bin/stress-generator-linux-amd64
 DNS_FILES=20 HTTP_FILES=20 ROWS_PER_FILE=50000 ./run_stress.sh
 ```
 
-The script recreates ClickHouse tables, generates input files, starts ETL, polls ClickHouse row counts, prints elapsed time and approximate rows per second, then stops ETL.
+如果只上传 `stress-test` 目录到服务器：
 
-## 4. Watch Metrics
+```bash
+cd stress-test
+bash run_stress.sh
+```
 
-Metrics are exposed through expvar:
+一键脚本会重建 ClickHouse 表、生成输入文件、启动 ETL、轮询 ClickHouse 行数、输出耗时和近似吞吐，然后停止 ETL。
+
+## 4. 查看指标
+
+指标通过 expvar 暴露：
 
 ```bash
 curl http://127.0.0.1:9090/debug/vars
 ```
 
-Important counters:
+如果把 `config.yaml` 中的 `metrics.prometheus_enabled` 改为 `true`，也可以查看 Prometheus 文本格式：
+
+```bash
+curl http://127.0.0.1:9090/metrics
+```
+
+重点关注：
 
 ```text
 go_etl_stress_dns_cdr_files_done_total
@@ -106,15 +129,15 @@ go_etl_stress_http_cdr_rows_written_total
 go_etl_stress_http_cdr_file_process_ms_total
 ```
 
-Approximate throughput can be calculated as:
+近似吞吐可以按下面方式计算：
 
 ```text
 rows_written_total / (file_process_ms_total / 1000)
 ```
 
-This is per-file processing time summed across files, so it is useful for relative comparisons between runs rather than exact wall-clock throughput.
+这个指标使用的是各文件处理耗时之和，适合做不同配置之间的相对比较；一键脚本输出的 `approx_rows_per_second` 使用整轮压测的墙钟时间计算。
 
-## 5. Verify Results
+## 5. 验证结果
 
 ```sql
 SELECT count() FROM cdr.stress_dns_cdr;
@@ -133,28 +156,28 @@ SELECT
 FROM cdr.stress_http_cdr;
 ```
 
-For the default generator settings, each table should contain 1,000,000 rows.
+默认生成参数下，每张表应有 1,000,000 行。
 
-## 6. Baseline Result
+## 6. 基准结果
 
-Stable baseline from a local VM test:
+本地虚拟机稳定压测基准：
 
 ```text
-OS: CentOS 7.9
-CPU: 4 cores
-Memory: 8 GiB
-Disk: 40 GiB
-ClickHouse: local instance, 127.0.0.1:9000
-Data scale: 20,000,000 rows
-DNS rows: 10,000,000
-HTTP rows: 10,000,000
-Elapsed: 91s
-Throughput: about 210,000-220,000 rows/s
-Dead-letter files: 0
-Failed row/file logs: 0
+操作系统: CentOS 7.9
+CPU: 4 核
+内存: 8 GiB
+磁盘: 40 GiB
+ClickHouse: 本机实例，127.0.0.1:9000
+数据规模: 20,000,000 行
+DNS 行数: 10,000,000
+HTTP 行数: 10,000,000
+耗时: 91s
+吞吐: 约 210,000-220,000 行/秒
+死信文件数: 0
+失败行/文件日志: 0
 ```
 
-Stable configuration:
+稳定配置：
 
 ```yaml
 clickhouse:
@@ -162,24 +185,38 @@ clickhouse:
   max_idle_conns: 8
   batch_size: 50000
   flush_interval: 1s
+  write_timeout: 60s
+  async_insert:
+    enabled: false
+    wait: true
 ```
 
-Pipeline configuration:
+IP 库缓存：
+
+```yaml
+ip_db:
+  cache_size: 4096
+```
+
+Pipeline 配置：
 
 ```yaml
 workers: 2
 batch_size: 50000
 ```
 
-Observed tuning notes:
+调优观察：
 
-- `workers: 2` was stable on a 4-core VM and reached about 210k-220k rows/s.
-- `batch_size: 50000` and `batch_size: 100000` had similar peak throughput.
-- `batch_size: 50000` is preferred because it has lower memory pressure and lower retry cost.
-- `workers: 10` overloaded the VM/ClickHouse write path and caused `send batch: context deadline exceeded`.
-- Disk free space matters. ClickHouse failed with `Cannot reserve 1.00 MiB, not enough space` when the root filesystem was full.
+- `workers: 2` 在 4 核虚拟机上稳定，吞吐约 210k-220k 行/秒。
+- `batch_size: 50000` 和 `batch_size: 100000` 峰值吞吐接近。
+- 推荐 `batch_size: 50000`，因为内存压力更低，失败重试成本也更低。
+- `workers: 10` 会压垮虚拟机和 ClickHouse 写入链路，出现 `send batch: context deadline exceeded`。
+- `write_timeout` 可按 ClickHouse 写入延迟调大；当前压测基准使用 `60s`。
+- 磁盘可用空间很关键。根分区写满时，ClickHouse 会报 `Cannot reserve 1.00 MiB, not enough space`。
 
-## 7. Reset
+## 7. 重置环境
+
+在仓库根目录执行：
 
 ```bash
 rm -rf examples/stress-test/watch
@@ -188,4 +225,11 @@ rm -rf examples/stress-test/dead
 rm -f examples/stress-test/file_status.db
 ```
 
-Then regenerate input files and rerun the ETL.
+在 `stress-test` 目录内执行：
+
+```bash
+rm -rf watch archive dead
+rm -f file_status.db stress-etl.log
+```
+
+然后重新生成输入文件并启动 ETL。

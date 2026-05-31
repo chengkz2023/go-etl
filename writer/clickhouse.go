@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -15,23 +14,26 @@ import (
 
 // ClickHouseWriter batches rows and writes them to ClickHouse.
 type ClickHouseWriter struct {
-	conn          driver.Conn
-	table         string
-	fieldNames    []string
-	converter     *rowConverter
-	batchSize     int
-	flushInterval time.Duration
-
-	mu     sync.Mutex
-	buffer []model.Row
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
+	conn         driver.Conn
+	table        string
+	fieldNames   []string
+	converter    *rowConverter
+	writeTimeout time.Duration
+	insertFunc   func([]model.Row) error
 }
 
 // NewClickHouseWriter creates a new writer connected to ClickHouse.
-func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string, fields []model.FieldDef, batchSize int, flushInterval time.Duration) (*ClickHouseWriter, error) {
+func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string, fields []model.FieldDef) (*ClickHouseWriter, error) {
+	settings := clickhouse.Settings{}
+	if cfg.AsyncInsertEnabled {
+		settings["async_insert"] = 1
+		if cfg.AsyncInsertWait {
+			settings["wait_for_async_insert"] = 1
+		} else {
+			settings["wait_for_async_insert"] = 0
+		}
+	}
+
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: cfg.Hosts,
 		Auth: clickhouse.Auth{
@@ -42,6 +44,7 @@ func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string
 		MaxOpenConns: cfg.MaxOpenConns,
 		MaxIdleConns: cfg.MaxIdleConns,
 		Debug:        cfg.Debug,
+		Settings:     settings,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("connect to ClickHouse: %w", err)
@@ -51,83 +54,57 @@ func NewClickHouseWriter(cfg ClickHouseConfig, table string, fieldNames []string
 		return nil, fmt.Errorf("ping ClickHouse: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = 60 * time.Second
+	}
 
 	w := &ClickHouseWriter{
-		conn:          conn,
-		table:         table,
-		fieldNames:    fieldNames,
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		ctx:           ctx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
+		conn:         conn,
+		table:        table,
+		fieldNames:   fieldNames,
+		writeTimeout: cfg.WriteTimeout,
 	}
 	if len(fields) > 0 {
 		w.converter = newRowConverter(fields)
 		w.fieldNames = w.converter.fieldNames()
 	}
 
-	// Start background flusher
-	go w.flushLoop()
-
 	return w, nil
 }
 
 // ClickHouseConfig is a simplified config for the writer.
 type ClickHouseConfig struct {
-	Hosts        []string
-	Database     string
-	Username     string
-	Password     string
-	MaxOpenConns int
-	MaxIdleConns int
-	Debug        bool
+	Hosts              []string
+	Database           string
+	Username           string
+	Password           string
+	MaxOpenConns       int
+	MaxIdleConns       int
+	Debug              bool
+	WriteTimeout       time.Duration
+	AsyncInsertEnabled bool
+	AsyncInsertWait    bool
 }
 
-// Write adds a row to the buffer. Flushes if buffer is full.
+// Write writes one row immediately. Prefer WriteBatch for ClickHouse throughput.
 func (w *ClickHouseWriter) Write(row model.Row) error {
-	w.mu.Lock()
-	w.buffer = append(w.buffer, row)
-	shouldFlush := len(w.buffer) >= w.batchSize
-	w.mu.Unlock()
-
-	if shouldFlush {
-		return w.Flush()
-	}
-	return nil
+	return w.WriteBatch([]model.Row{row})
 }
 
-// WriteBatch adds multiple rows and flushes if buffer exceeds size.
+// WriteBatch writes one independent ClickHouse batch.
 func (w *ClickHouseWriter) WriteBatch(rows []model.Row) error {
-	w.mu.Lock()
-	w.buffer = append(w.buffer, rows...)
-	shouldFlush := len(w.buffer) >= w.batchSize
-	w.mu.Unlock()
-
-	if shouldFlush {
-		return w.Flush()
-	}
-	return nil
-}
-
-// Flush writes all buffered rows to ClickHouse.
-func (w *ClickHouseWriter) Flush() error {
-	w.mu.Lock()
-	if len(w.buffer) == 0 {
-		w.mu.Unlock()
+	if len(rows) == 0 {
 		return nil
 	}
-	batch := w.buffer
-	w.buffer = make([]model.Row, 0, w.batchSize)
-	w.mu.Unlock()
-
-	return w.insert(batch)
+	if w.insertFunc != nil {
+		return w.insertFunc(rows)
+	}
+	return w.insert(rows)
 }
 
 // insert performs a batch insert into ClickHouse.
 func (w *ClickHouseWriter) insert(rows []model.Row) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), w.writeTimeout)
 	defer cancel()
 
 	batch, err := w.conn.PrepareBatch(ctx, w.insertSQL())
@@ -171,27 +148,7 @@ func (w *ClickHouseWriter) rowValues(row model.Row) ([]interface{}, error) {
 	return values, nil
 }
 
-// flushLoop periodically flushes the buffer.
-func (w *ClickHouseWriter) flushLoop() {
-	defer close(w.done)
-	ticker := time.NewTicker(w.flushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-w.ctx.Done():
-			// Final flush before exit
-			w.Flush()
-			return
-		case <-ticker.C:
-			w.Flush()
-		}
-	}
-}
-
-// Close flushes remaining data and closes the connection.
+// Close closes the ClickHouse connection.
 func (w *ClickHouseWriter) Close() error {
-	w.cancel()
-	<-w.done
 	return w.conn.Close()
 }

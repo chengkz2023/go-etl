@@ -1,12 +1,12 @@
 name: http_cdr
-watch_dir: ./examples/full-test/watch/http
+watch_dir: ./watch/http
 file_pattern: "*.log"
 ready_strategy: atomic_rename
 temp_suffixes:
   - ".tmp"
   - ".writing"
-archive_dir: ./examples/full-test/archive/http
-dead_letter_dir: ./examples/full-test/dead/http
+archive_dir: ./archive/http
+dead_letter_dir: ./dead/http
 delimiter: "|++|"
 has_header_meta: false
 fields:
@@ -63,7 +63,7 @@ transformers:
       - server_geo
   - type: dict_mapper
     field: method
-    dict_file: ./examples/full-test/dict/http_method.csv
+    dict_file: ./dict/http_method.csv
 clickhouse_table: cdr.http_cdr
 workers: 2
 batch_size: 2

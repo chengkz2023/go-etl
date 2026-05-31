@@ -87,6 +87,13 @@ func (c *Config) applyDefaults() {
 	if c.ClickHouse.FlushInterval == 0 {
 		c.ClickHouse.FlushInterval = 5_000_000_000 // 5s in ns
 	}
+	if c.ClickHouse.WriteTimeout == 0 {
+		c.ClickHouse.WriteTimeout = 60_000_000_000 // 60s in ns
+	}
+	if c.ClickHouse.AsyncInsert.Wait == nil {
+		wait := true
+		c.ClickHouse.AsyncInsert.Wait = &wait
+	}
 
 	for i := range c.Pipelines {
 		if c.Pipelines[i].Workers == 0 {
@@ -119,6 +126,18 @@ func (c *Config) applyDefaults() {
 		if c.Pipelines[i].RetryInterval == 0 {
 			c.Pipelines[i].RetryInterval = 60_000_000_000 // 60s in ns
 		}
+		if c.Pipelines[i].Dedup.RecordIDField == "" {
+			c.Pipelines[i].Dedup.RecordIDField = "_etl_record_id"
+		}
+		if c.Pipelines[i].Dedup.SourceFileField == "" {
+			c.Pipelines[i].Dedup.SourceFileField = "_etl_source_file"
+		}
+		if c.Pipelines[i].Dedup.LineNumberField == "" {
+			c.Pipelines[i].Dedup.LineNumberField = "_etl_line_number"
+		}
+		if c.Pipelines[i].Dedup.RowHashField == "" {
+			c.Pipelines[i].Dedup.RowHashField = "_etl_row_hash"
+		}
 	}
 }
 
@@ -129,6 +148,12 @@ func (c *Config) Validate() error {
 	}
 	if c.ClickHouse.Database == "" {
 		return fmt.Errorf("clickhouse.database is required")
+	}
+	if c.ClickHouse.WriteTimeout < 0 {
+		return fmt.Errorf("clickhouse.write_timeout must be >= 0")
+	}
+	if c.IPDB.CacheSize < 0 {
+		return fmt.Errorf("ip_db.cache_size must be >= 0")
 	}
 	if len(c.Pipelines) == 0 {
 		return fmt.Errorf("at least one pipeline is required (configure inline or via pipeline_dir)")

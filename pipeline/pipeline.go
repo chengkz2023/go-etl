@@ -3,9 +3,12 @@ package pipeline
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +36,6 @@ type Pipeline struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
 }
 
 // New creates a new Pipeline.
@@ -60,19 +62,20 @@ func New(
 	writeFields = append(writeFields, cfg.Fields...)
 	chWriter, err := writer.NewClickHouseWriter(
 		writer.ClickHouseConfig{
-			Hosts:        chCfg.Hosts,
-			Database:     chCfg.Database,
-			Username:     chCfg.Username,
-			Password:     chCfg.Password,
-			MaxOpenConns: chCfg.MaxOpenConns,
-			MaxIdleConns: chCfg.MaxIdleConns,
-			Debug:        chCfg.Debug,
+			Hosts:              chCfg.Hosts,
+			Database:           chCfg.Database,
+			Username:           chCfg.Username,
+			Password:           chCfg.Password,
+			MaxOpenConns:       chCfg.MaxOpenConns,
+			MaxIdleConns:       chCfg.MaxIdleConns,
+			Debug:              chCfg.Debug,
+			WriteTimeout:       chCfg.WriteTimeout,
+			AsyncInsertEnabled: chCfg.AsyncInsert.Enabled,
+			AsyncInsertWait:    chCfg.AsyncInsert.Wait != nil && *chCfg.AsyncInsert.Wait,
 		},
 		cfg.ClickHouseTable,
 		fieldNames(writeFields),
 		writeFields,
-		cfg.BatchSize,
-		chCfg.FlushInterval,
 	)
 	if err != nil {
 		cancel()
@@ -137,16 +140,17 @@ func (p *Pipeline) Run() error {
 
 	// Worker pool
 	workCh := make(chan string, 100)
+	var workerWG sync.WaitGroup
 	for i := 0; i < p.cfg.Workers; i++ {
-		p.wg.Add(1)
-		go p.worker(workCh)
+		workerWG.Add(1)
+		go p.worker(workCh, &workerWG)
 	}
 
 	// Dispatch files to workers
-	p.wg.Add(1)
+	var producerWG sync.WaitGroup
+	producerWG.Add(1)
 	go func() {
-		defer p.wg.Done()
-		defer close(workCh)
+		defer producerWG.Done()
 		for {
 			select {
 			case <-p.ctx.Done():
@@ -165,14 +169,18 @@ func (p *Pipeline) Run() error {
 	}()
 
 	if p.cfg.RetryFailed {
-		p.wg.Add(1)
-		go p.retryDispatcher(workCh)
+		producerWG.Add(1)
+		go p.retryDispatcher(workCh, &producerWG)
 	}
 
 	<-p.ctx.Done()
 	p.logger.Info("pipeline shutting down")
 	w.Stop()
-	p.wg.Wait()
+
+	// Stop producers first, then close the work channel so workers can drain safely.
+	producerWG.Wait()
+	close(workCh)
+	workerWG.Wait()
 
 	if err := p.clickWriter.Close(); err != nil {
 		p.logger.Error("close ClickHouse writer", zap.Error(err))
@@ -180,15 +188,15 @@ func (p *Pipeline) Run() error {
 	return nil
 }
 
-func (p *Pipeline) worker(workCh <-chan string) {
-	defer p.wg.Done()
+func (p *Pipeline) worker(workCh <-chan string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	for filePath := range workCh {
 		p.processFile(filePath)
 	}
 }
 
-func (p *Pipeline) retryDispatcher(workCh chan<- string) {
-	defer p.wg.Done()
+func (p *Pipeline) retryDispatcher(workCh chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
 
 	interval := p.cfg.RetryInterval
 	if interval <= 0 || interval > 10*time.Second {
@@ -274,30 +282,29 @@ func (p *Pipeline) processFile(filePath string) {
 	readRows := 0
 	processed := 0
 	transformErrors := 0
-	err = rdr.ReadBatches(f, batchSize, func(batch []model.Row) error {
-		readRows += len(batch)
-		transformed := p.chain.BatchTransform(batch, func(row model.Row, err error) {
+	err = rdr.ReadBatchesWithMeta(f, batchSize, func(batch reader.Batch) error {
+		readRows += len(batch.Rows)
+		p.applyDedupMeta(filePath, batch)
+		transformed := p.chain.BatchTransform(batch.Rows, func(row model.Row, err error) {
 			transformErrors++
 			logger.Warn("transform row failed", zap.Error(err))
 		})
 
 		if len(transformed) > 0 {
+			writeStart := time.Now()
 			if err := p.clickWriter.WriteBatch(transformed); err != nil {
+				metrics.Inc(p.cfg.Name, "batch_write_errors_total", 1)
 				return err
 			}
+			metrics.Inc(p.cfg.Name, "batches_written_total", 1)
+			metrics.Inc(p.cfg.Name, "batch_rows_written_total", int64(len(transformed)))
+			metrics.ObserveDuration(p.cfg.Name, "batch_write", time.Since(writeStart))
 		}
 		processed += len(transformed)
 		return nil
 	})
 	if err != nil {
 		logger.Error("process file failed", zap.Error(err))
-		p.failFile(filePath, err, logger)
-		metrics.Inc(p.cfg.Name, "files_failed_total", 1)
-		return
-	}
-
-	if err := p.clickWriter.Flush(); err != nil {
-		logger.Error("flush failed", zap.Error(err))
 		p.failFile(filePath, err, logger)
 		metrics.Inc(p.cfg.Name, "files_failed_total", 1)
 		return
@@ -326,6 +333,36 @@ func (p *Pipeline) processFile(filePath string) {
 	)
 }
 
+func (p *Pipeline) applyDedupMeta(filePath string, batch reader.Batch) {
+	if !p.cfg.Dedup.Enabled {
+		return
+	}
+	for i, row := range batch.Rows {
+		if i >= len(batch.Meta) {
+			continue
+		}
+		meta := batch.Meta[i]
+		sourceFile := filepath.Base(filePath)
+		lineNumber := strconv.Itoa(meta.LineNumber)
+		rowHash := meta.RawHash
+		recordID := stableRecordID(filePath, lineNumber, rowHash)
+
+		row[p.cfg.Dedup.SourceFileField] = sourceFile
+		row[p.cfg.Dedup.LineNumberField] = lineNumber
+		row[p.cfg.Dedup.RowHashField] = rowHash
+		row[p.cfg.Dedup.RecordIDField] = recordID
+	}
+}
+
+func stableRecordID(parts ...string) string {
+	h := sha1.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func (p *Pipeline) afterSuccess(filePath string, logger *zap.Logger) {
 	if p.cfg.CleanupMarker {
 		if err := p.cleanupMarker(filePath); err != nil {
@@ -344,6 +381,7 @@ func (p *Pipeline) afterSuccess(filePath string, logger *zap.Logger) {
 		metrics.Inc(p.cfg.Name, "archive_errors_total", 1)
 		return
 	}
+	p.moveMarkerWithData(filePath, targetPath, logger)
 	metrics.Inc(p.cfg.Name, "files_archived_total", 1)
 	logger.Info("file archived", zap.String("target", targetPath))
 }
@@ -389,6 +427,7 @@ func (p *Pipeline) failFile(filePath string, cause error, logger *zap.Logger) {
 		logger.Error("move dead-letter file failed", zap.Error(moveErr))
 		return
 	}
+	p.moveMarkerWithData(filePath, targetPath, logger)
 	if err := p.store.MarkDead(p.cfg.Name, filePath, targetPath); err != nil {
 		logger.Error("mark dead-letter failed", zap.Error(err))
 		return
@@ -402,6 +441,28 @@ func (p *Pipeline) moveToDeadLetter(filePath string) (string, error) {
 		return "", nil
 	}
 	return moveFileToDir(filePath, p.cfg.DeadLetterDir)
+}
+
+func (p *Pipeline) moveMarkerWithData(sourcePath, targetPath string, logger *zap.Logger) {
+	if p.cfg.ReadyStrategy != watcher.ReadyMarker || p.cfg.MarkerSuffix == "" || targetPath == "" {
+		return
+	}
+	sourceMarker := sourcePath + p.cfg.MarkerSuffix
+	if _, err := os.Stat(sourceMarker); os.IsNotExist(err) {
+		return
+	} else if err != nil {
+		logger.Warn("stat marker failed", zap.Error(err))
+		return
+	}
+
+	targetMarker := targetPath + p.cfg.MarkerSuffix
+	if err := os.MkdirAll(filepath.Dir(targetMarker), 0755); err != nil {
+		logger.Warn("create marker target dir failed", zap.Error(err))
+		return
+	}
+	if err := os.Rename(sourceMarker, targetMarker); err != nil {
+		logger.Warn("move marker failed", zap.String("marker", sourceMarker), zap.Error(err))
+	}
 }
 
 func moveFileToDir(filePath, targetDir string) (string, error) {
@@ -463,7 +524,6 @@ func inputFieldNames(fields []model.FieldDef) []string {
 // Shutdown gracefully stops the pipeline.
 func (p *Pipeline) Shutdown() {
 	p.cancel()
-	p.wg.Wait()
 }
 
 // buildTransformChain creates a transform.Chain from config.

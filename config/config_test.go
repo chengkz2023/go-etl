@@ -53,6 +53,15 @@ pipelines:
 	if cfg.Metrics.Addr != ":9090" {
 		t.Fatalf("Metrics.Addr = %q", cfg.Metrics.Addr)
 	}
+	if cfg.ClickHouse.WriteTimeout != time.Minute {
+		t.Fatalf("WriteTimeout = %s", cfg.ClickHouse.WriteTimeout)
+	}
+	if cfg.ClickHouse.AsyncInsert.Wait == nil || !*cfg.ClickHouse.AsyncInsert.Wait {
+		t.Fatal("AsyncInsert.Wait should default to true")
+	}
+	if p.Dedup.RecordIDField != "_etl_record_id" {
+		t.Fatalf("Dedup.RecordIDField = %q", p.Dedup.RecordIDField)
+	}
 }
 
 func TestLoadRejectsInvalidReadyStrategy(t *testing.T) {
@@ -154,7 +163,16 @@ pipelines:
 }
 
 func TestLoadFullFixture(t *testing.T) {
-	cfg, err := Load("../examples/full-test/config.yaml")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir("../examples/full-test"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	cfg, err := Load("config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

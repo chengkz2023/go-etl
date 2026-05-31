@@ -1,6 +1,9 @@
 CREATE DATABASE IF NOT EXISTS cdr;
 
-CREATE TABLE IF NOT EXISTS cdr.dns_cdr
+DROP TABLE IF EXISTS cdr.dns_cdr;
+DROP TABLE IF EXISTS cdr.http_cdr;
+
+CREATE TABLE cdr.dns_cdr
 (
     event_time DateTime,
     src_ip IPv4,
@@ -24,7 +27,7 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_time)
 ORDER BY (event_time, src_ip, domain);
 
-CREATE TABLE IF NOT EXISTS cdr.http_cdr
+CREATE TABLE cdr.http_cdr
 (
     event_time DateTime,
     client_ip IPv4,

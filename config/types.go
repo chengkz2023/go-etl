@@ -17,21 +17,30 @@ type Config struct {
 
 // MetricsConfig controls the built-in expvar metrics endpoint.
 type MetricsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"` // default ":9090"
+	Enabled           bool   `yaml:"enabled"`
+	Addr              string `yaml:"addr"`               // default ":9090"
+	PrometheusEnabled bool   `yaml:"prometheus_enabled"` // expose /metrics in Prometheus text format
 }
 
 // ClickHouseConfig holds ClickHouse connection parameters.
 type ClickHouseConfig struct {
-	Hosts         []string      `yaml:"hosts"`
-	Database      string        `yaml:"database"`
-	Username      string        `yaml:"username"`
-	Password      string        `yaml:"password"`
-	MaxOpenConns  int           `yaml:"max_open_conns"` // default 10
-	MaxIdleConns  int           `yaml:"max_idle_conns"` // default 5
-	Debug         bool          `yaml:"debug"`
-	BatchSize     int           `yaml:"batch_size"`     // default 10000
-	FlushInterval time.Duration `yaml:"flush_interval"` // default 5s
+	Hosts         []string          `yaml:"hosts"`
+	Database      string            `yaml:"database"`
+	Username      string            `yaml:"username"`
+	Password      string            `yaml:"password"`
+	MaxOpenConns  int               `yaml:"max_open_conns"` // default 10
+	MaxIdleConns  int               `yaml:"max_idle_conns"` // default 5
+	Debug         bool              `yaml:"debug"`
+	BatchSize     int               `yaml:"batch_size"`     // default 10000
+	FlushInterval time.Duration     `yaml:"flush_interval"` // default 5s
+	WriteTimeout  time.Duration     `yaml:"write_timeout"`  // default 60s
+	AsyncInsert   AsyncInsertConfig `yaml:"async_insert"`
+}
+
+// AsyncInsertConfig controls ClickHouse server-side async insert buffering.
+type AsyncInsertConfig struct {
+	Enabled bool  `yaml:"enabled"`
+	Wait    *bool `yaml:"wait"` // default true when enabled
 }
 
 // IPDBConfig holds IP database configuration.
@@ -40,6 +49,16 @@ type IPDBConfig struct {
 	Path           string        `yaml:"path"`            // path to IP CSV file
 	Columns        []string      `yaml:"columns"`         // column names in CSV
 	ReloadInterval time.Duration `yaml:"reload_interval"` // hot reload interval
+	CacheSize      int           `yaml:"cache_size"`      // optional lookup cache size, 0 disables cache
+}
+
+// DedupConfig controls optional stable row metadata generation.
+type DedupConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	RecordIDField   string `yaml:"record_id_field"`
+	SourceFileField string `yaml:"source_file_field"`
+	LineNumberField string `yaml:"line_number_field"`
+	RowHashField    string `yaml:"row_hash_field"`
 }
 
 // PipelineConfig defines one ETL pipeline (one directory → one table).
@@ -66,6 +85,7 @@ type PipelineConfig struct {
 	DeadLetterDir   string              `yaml:"dead_letter_dir"`
 	ArchiveDir      string              `yaml:"archive_dir"`
 	CleanupMarker   bool                `yaml:"cleanup_marker"`
+	Dedup           DedupConfig         `yaml:"dedup"`
 }
 
 // TransformerConfig defines a transformer in the pipeline.
@@ -86,5 +106,6 @@ func DefaultClickHouseConfig() ClickHouseConfig {
 		MaxIdleConns:  5,
 		BatchSize:     10000,
 		FlushInterval: 5 * time.Second,
+		WriteTimeout:  60 * time.Second,
 	}
 }
