@@ -637,9 +637,10 @@ DNS_FILES=100 HTTP_FILES=100 ROWS_PER_FILE=100000 TIMEOUT_SECONDS=3600 bash run_
 POLL_SECONDS=1 bash run_stress.sh
 ```
 
-本地虚拟机稳定压测基准：
+本地虚拟机最新稳定压测记录：
 
 ```text
+压测日期: 2026-05-31
 操作系统: CentOS 7.9
 CPU: 4 核
 内存: 8 GiB
@@ -648,8 +649,10 @@ ClickHouse: 本机实例，127.0.0.1:9000
 数据规模: 20,000,000 行
 DNS 行数: 10,000,000
 HTTP 行数: 10,000,000
-耗时: 91s
-吞吐: 约 210,000-220,000 行/秒
+耗时: 79s
+吞吐: 约 253,164 行/秒
+历史基准: 91s，约 210,000-220,000 行/秒
+相对历史基准提升: 耗时约降低 13.2%，吞吐约提升 15%-20%
 死信文件数: 0
 失败行/文件日志: 0
 ```
@@ -672,10 +675,21 @@ workers: 2
 batch_size: 50000
 ```
 
+配置对比记录：
+
+```text
+A. workers=2, batch_size=50000,  cache_size=4096   -> 79s, 253,164 行/秒
+B. workers=2, batch_size=100000, cache_size=4096   -> 78s, 256,410 行/秒
+C. workers=3, batch_size=50000,  cache_size=4096   -> 78s, 256,410 行/秒
+D. workers=3, batch_size=100000, cache_size=4096   -> 121s, 165,289 行/秒
+```
+
 调优结论：
 
-- 4 核 8 GiB 虚拟机上，`workers: 2` 稳定达到约 21 万到 22 万行/秒。
-- `batch_size: 50000` 和 `batch_size: 100000` 吞吐接近，推荐使用 `50000`，降低内存压力和失败重试成本。
+- 4 核 8 GiB 虚拟机上，`workers: 2` + `batch_size: 50000` 稳定达到约 25.3 万行/秒。
+- 单独把 `batch_size` 提到 `100000` 或单独把 `workers` 提到 `3`，本轮只提升约 1.3%，基本属于压测波动范围。
+- `workers: 3` + `batch_size: 100000` 明显退化到约 16.5 万行/秒，不建议在 4 核 8 GiB 环境使用。
+- 推荐使用 `batch_size: 50000`，降低内存压力和失败重试成本。
 - `workers: 10` 会压垮当前虚拟机和 ClickHouse 写入链路，出现 `send batch: context deadline exceeded`。
 - `write_timeout` 建议结合实际慢查询、磁盘和 ClickHouse merge 压力调优；压测基准使用 `60s`。
 - 磁盘空间不足会导致 ClickHouse 报 `Cannot reserve 1.00 MiB, not enough space`，压测前应确认 ClickHouse 数据盘有足够可用空间。

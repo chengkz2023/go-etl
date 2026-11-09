@@ -160,9 +160,10 @@ FROM cdr.stress_http_cdr;
 
 ## 6. 基准结果
 
-本地虚拟机稳定压测基准：
+本地虚拟机最新稳定压测记录：
 
 ```text
+压测日期: 2026-05-31
 操作系统: CentOS 7.9
 CPU: 4 核
 内存: 8 GiB
@@ -171,8 +172,10 @@ ClickHouse: 本机实例，127.0.0.1:9000
 数据规模: 20,000,000 行
 DNS 行数: 10,000,000
 HTTP 行数: 10,000,000
-耗时: 91s
-吞吐: 约 210,000-220,000 行/秒
+耗时: 79s
+吞吐: 约 253,164 行/秒
+历史基准: 91s，约 210,000-220,000 行/秒
+相对历史基准提升: 耗时约降低 13.2%，吞吐约提升 15%-20%
 死信文件数: 0
 失败行/文件日志: 0
 ```
@@ -205,11 +208,21 @@ workers: 2
 batch_size: 50000
 ```
 
+配置对比记录：
+
+```text
+A. workers=2, batch_size=50000,  cache_size=4096   -> 79s, 253,164 行/秒
+B. workers=2, batch_size=100000, cache_size=4096   -> 78s, 256,410 行/秒
+C. workers=3, batch_size=50000,  cache_size=4096   -> 78s, 256,410 行/秒
+D. workers=3, batch_size=100000, cache_size=4096   -> 121s, 165,289 行/秒
+```
+
 调优观察：
 
-- `workers: 2` 在 4 核虚拟机上稳定，吞吐约 210k-220k 行/秒。
-- `batch_size: 50000` 和 `batch_size: 100000` 峰值吞吐接近。
-- 推荐 `batch_size: 50000`，因为内存压力更低，失败重试成本也更低。
+- `workers: 2` + `batch_size: 50000` 在 4 核 8 GiB 虚拟机上稳定，吞吐约 253k 行/秒。
+- 单独把 `batch_size` 提到 `100000` 或单独把 `workers` 提到 `3`，本轮只提升约 1.3%，基本属于压测波动范围。
+- `workers: 3` + `batch_size: 100000` 明显退化到约 165k 行/秒，不建议在 4 核 8 GiB 环境使用。
+- 推荐继续使用 `batch_size: 50000`，因为吞吐接近峰值，同时内存压力更低，失败重试成本也更低。
 - `workers: 10` 会压垮虚拟机和 ClickHouse 写入链路，出现 `send batch: context deadline exceeded`。
 - `write_timeout` 可按 ClickHouse 写入延迟调大；当前压测基准使用 `60s`。
 - 磁盘可用空间很关键。根分区写满时，ClickHouse 会报 `Cannot reserve 1.00 MiB, not enough space`。
